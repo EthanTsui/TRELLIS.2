@@ -3,10 +3,12 @@ Visual Hull computation for multi-view silhouette intersection.
 
 Uses TRELLIS.2's Z-up canonical space with yaw/pitch camera convention.
 See Doc 14 R-P2-1 for coordinate system corrections.
+
+Supports optional depth-guided carving for tighter hull estimation.
 """
 import torch
 import torch.nn.functional as F
-from typing import List
+from typing import List, Optional
 
 
 def compute_visual_hull(
@@ -18,6 +20,8 @@ def compute_visual_hull(
     alpha_threshold: float = 0.15,
     dilation_voxels: int = 3,
     max_removal_ratio: float = 0.3,
+    depth_maps: Optional[List[torch.Tensor]] = None,
+    depth_margin: float = 0.1,
 ) -> torch.Tensor:
     """
     Compute visual hull mask from multi-view silhouettes.
@@ -34,6 +38,9 @@ def compute_visual_hull(
         alpha_threshold: Threshold for binarizing silhouettes.
         dilation_voxels: Dilation kernel half-size (must be >= 1).
         max_removal_ratio: Safety cap on fraction of voxels removed.
+        depth_maps: Optional K tensors of shape [H, W] (normalized depth, 0=near, 1=far).
+                    When provided, enables depth-guided carving for tighter hull.
+        depth_margin: Tolerance margin for depth comparison (in normalized depth units).
 
     Returns:
         hull_mask: Bool tensor [1, 1, R, R, R] suitable for AND with decoded structure.
@@ -93,6 +100,36 @@ def compute_visual_hull(
         # Voxels behind camera or outside image should be marked as outside
         in_front = depth > 0
         visible = (sampled > 0.5) & in_front
+
+        # --- Depth-guided carving ---
+        if depth_maps is not None and i < len(depth_maps) and depth_maps[i] is not None:
+            depth_map = depth_maps[i]  # [H, W] normalized [0, 1]
+            dh, dw = depth_map.shape
+
+            # Sample estimated depth at projected UV locations
+            depth_input = depth_map.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+            # Resize UV grid if depth map resolution differs
+            if dh != H or dw != W:
+                uv_depth = uv_grid.clone()
+            else:
+                uv_depth = uv_grid
+            sampled_depth = F.grid_sample(
+                depth_input, uv_depth, mode='bilinear',
+                padding_mode='border', align_corners=False
+            ).squeeze()  # [R^3]
+
+            # Normalize actual camera depth to [0, 1] range
+            fg_depth = depth[visible]
+            if fg_depth.numel() > 0:
+                d_min, d_max = fg_depth.min(), fg_depth.max()
+                if d_max - d_min > 1e-6:
+                    depth_normalized = (depth - d_min) / (d_max - d_min)
+                else:
+                    depth_normalized = torch.zeros_like(depth)
+
+                # Carve voxels that are significantly behind the estimated surface
+                depth_consistent = (depth_normalized <= sampled_depth + depth_margin) | ~visible
+                visible = visible & depth_consistent
 
         hull = hull & visible
 

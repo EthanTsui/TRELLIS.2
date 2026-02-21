@@ -12,6 +12,87 @@ import nvdiffrast.torch as dr
 import cumesh
 
 
+def _detect_uv_seams(mask, uvs, faces, texture_size, width=3):
+    """Detect UV seam boundaries in texture space.
+
+    UV seams occur at chart boundaries where neighboring texels in the texture
+    come from different UV charts. These cause visible discontinuities.
+
+    Args:
+        mask: [H, W] bool, valid texel mask.
+        uvs: [V, 2] tensor, UV coordinates.
+        faces: [F, 3] tensor, face indices.
+        texture_size: int, texture resolution.
+        width: int, seam band width in pixels.
+
+    Returns:
+        [H, W] bool mask of seam pixels.
+    """
+    # Simple approach: detect seams via mask boundary erosion.
+    # UV chart edges are where valid texels border invalid ones.
+    mask_u8 = mask.astype(np.uint8) * 255
+
+    # Erode mask to find interior
+    kernel = np.ones((width * 2 + 1, width * 2 + 1), np.uint8)
+    eroded = cv2.erode(mask_u8, kernel, iterations=1)
+
+    # Seam band = valid texels that are near the edge of the valid region
+    seam_mask = mask & (eroded < 128)
+
+    return seam_mask
+
+
+def _laplacian_seam_smooth(texture, seam_mask, levels=3):
+    """Multi-scale Laplacian blending at UV seams.
+
+    Builds a Gaussian pyramid, smooths the seam regions at each level,
+    then reconstructs. This preserves detail away from seams while
+    reducing discontinuities at seam boundaries.
+
+    Args:
+        texture: [H, W, 3] uint8 base color texture.
+        seam_mask: [H, W] bool, seam pixel mask.
+        levels: int, number of pyramid levels.
+
+    Returns:
+        [H, W, 3] uint8 smoothed texture.
+    """
+    tex_float = texture.astype(np.float32)
+    result = tex_float.copy()
+
+    # Build Gaussian pyramid
+    pyramid = [tex_float]
+    for _ in range(levels):
+        pyramid.append(cv2.pyrDown(pyramid[-1]))
+
+    # Build mask pyramid
+    mask_float = seam_mask.astype(np.float32)
+    mask_pyramid = [mask_float]
+    for _ in range(levels):
+        mask_pyramid.append(cv2.pyrDown(mask_pyramid[-1]))
+
+    # Smooth from coarse to fine
+    for level in reversed(range(levels)):
+        # Get the smoothed version at this level
+        sigma = 3.0 * (level + 1)
+        smoothed = cv2.GaussianBlur(pyramid[level], (0, 0), sigmaX=sigma)
+
+        # Resize mask to match this level
+        h, w = pyramid[level].shape[:2]
+        level_mask = cv2.resize(mask_pyramid[level], (w, h))
+
+        # Blend factor: stronger smoothing at coarser levels
+        blend_strength = np.clip(level_mask, 0, 1)[..., None]
+        alpha = blend_strength * (0.3 + 0.2 * level)  # 0.3-0.7 blend range
+        pyramid[level] = pyramid[level] * (1 - alpha) + smoothed * alpha
+
+    # Reconstruct: only apply changes at seam pixels
+    seam_3d = seam_mask[..., None].astype(np.float32)
+    result = result * (1 - seam_3d) + pyramid[0] * seam_3d
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
 def to_glb(
     vertices: torch.Tensor,
     faces: torch.Tensor,
@@ -37,6 +118,11 @@ def to_glb(
     enable_grey_recovery: bool = True,
     enable_normal_map: bool = True,
     enable_ao: bool = True,
+    enable_seam_smoothing: bool = True,
+    seam_smooth_levels: int = 3,
+    seam_smooth_width: int = 3,
+    grey_recovery_rounds: int = 2,
+    grey_recovery_sigma: float = 25.0,
     sharpen_texture: bool = False,
     verbose: bool = False,
     use_tqdm: bool = False,
@@ -461,38 +547,41 @@ def to_glb(
     alpha = np.clip(attrs[..., attr_layout['alpha']].cpu().numpy() * 255, 0, 255).astype(np.uint8)
     alpha_mode = 'OPAQUE'
 
-    # --- Grey/desaturated texel recovery ---
+    # --- Grey/desaturated texel recovery (multi-round with chroma-aware weights) ---
     if enable_grey_recovery:
         # The voxel grid produces low-saturation (grey) values for surfaces not well-visible
-        # in the input image (back, inside, etc.). Use Gaussian-weighted diffusion from
-        # nearby colorful texels to fill grey areas with plausible colors.
-        bc_float = base_color.astype(np.float32)
-        max_c = np.maximum(np.maximum(bc_float[..., 0], bc_float[..., 1]), bc_float[..., 2])
-        min_c = np.minimum(np.minimum(bc_float[..., 0], bc_float[..., 1]), bc_float[..., 2])
-        chroma = max_c - min_c
-        lum = (max_c + min_c) / 2
-        # Grey texels: valid, very low chroma, mid brightness (not black/white)
-        grey_texels = mask & (chroma < 18) & (lum > 80) & (lum < 200)
-        grey_pct = grey_texels.sum() / max(1, mask.sum()) * 100
-        if verbose:
-            print(f"\n  Grey texels detected: {grey_pct:.1f}%", end='', flush=True)
-        if grey_texels.sum() > 0:
+        # in the input image (back, inside, etc.). Use multi-round Gaussian-weighted diffusion
+        # from nearby colorful texels to fill grey areas with plausible colors.
+        for grey_round in range(grey_recovery_rounds):
+            bc_float = base_color.astype(np.float32)
+            max_c = np.maximum(np.maximum(bc_float[..., 0], bc_float[..., 1]), bc_float[..., 2])
+            min_c = np.minimum(np.minimum(bc_float[..., 0], bc_float[..., 1]), bc_float[..., 2])
+            chroma = max_c - min_c
+            lum = (max_c + min_c) / 2
+            # Grey texels: valid, very low chroma, mid brightness (not black/white)
+            grey_texels = mask & (chroma < 18) & (lum > 80) & (lum < 200)
+            grey_pct = grey_texels.sum() / max(1, mask.sum()) * 100
+            if verbose:
+                print(f"\n  Grey recovery round {grey_round+1}/{grey_recovery_rounds}: {grey_pct:.1f}% grey", end='', flush=True)
+            if grey_texels.sum() == 0:
+                break
             # Gaussian-weighted diffusion: spread color ONLY from colorful (high-chroma) texels
-            # This avoids cv2.inpaint pulling in dark/black colors from edges
             colorful_mask = mask & (chroma >= 18)
-            colorful_weight = colorful_mask.astype(np.float32)
+            # Chroma-aware weights: more colorful texels contribute more
+            chroma_weight = np.clip(chroma / 255.0, 0, 1)
+            colorful_weight = colorful_mask.astype(np.float32) * (0.3 + 0.7 * chroma_weight)
             colorful_color = bc_float.copy()
             colorful_color[~colorful_mask] = 0.0
-            # Moderate sigma to spread color into grey regions without over-tinting
-            sigma = 20.0
+            colorful_color *= colorful_weight[..., None]
+            # Increasing sigma per round for broader coverage
+            sigma = grey_recovery_sigma + grey_round * 10.0
             blurred_color = cv2.GaussianBlur(colorful_color, (0, 0), sigmaX=sigma)
             blurred_weight = cv2.GaussianBlur(colorful_weight, (0, 0), sigmaX=sigma)
-            # Normalize: weighted average of colorful texels only
             safe_weight = np.maximum(blurred_weight, 1e-6)
             avg_color = blurred_color / safe_weight[..., None]
-            # Blend: mix diffused color with original to keep some of the original lightness
-            # This prevents the warm over-tinting that full replacement causes
-            blend = 0.7
+            # Blend: decreasing original weight each round
+            blend = 0.7 + 0.1 * grey_round
+            blend = min(blend, 0.9)
             blended = blend * avg_color[grey_texels] + (1 - blend) * bc_float[grey_texels]
             base_color[grey_texels] = np.clip(blended, 0, 255).astype(np.uint8)
 
@@ -507,6 +596,20 @@ def to_glb(
         normal_map_np = cv2.inpaint(normal_map_np, mask_inv, 3, cv2.INPAINT_TELEA)
     if ao_np is not None:
         ao_np = cv2.inpaint(ao_np, mask_inv, 1, cv2.INPAINT_TELEA)
+
+    # --- UV Seam Smoothing (Laplacian multi-scale blend) ---
+    if enable_seam_smoothing:
+        # Detect UV seam boundaries: pixels where the UV gradient is discontinuous.
+        # Seams appear at UV chart edges — neighboring pixels in texture space may be
+        # far apart in UV space, causing visible color discontinuities.
+        seam_mask = _detect_uv_seams(mask, out_uvs, out_faces, texture_size, seam_smooth_width)
+        seam_pct = seam_mask.sum() / max(1, mask.sum()) * 100
+        if verbose:
+            print(f"\n  UV seam pixels: {seam_pct:.1f}%", end='', flush=True)
+        if seam_mask.sum() > 0:
+            base_color = _laplacian_seam_smooth(base_color, seam_mask, seam_smooth_levels)
+            if verbose:
+                print(" smoothed", end='', flush=True)
 
     # Optional: clamp metallic to prevent unreasonable values
     if max_metallic is not None:

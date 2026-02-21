@@ -1,0 +1,64 @@
+{
+  "id": "2026-02-19_000",
+  "timestamp": "2026-02-19T00:00:00Z",
+  "description": "GA v2 Champion (gen3-005) - Current best configuration from genetic algorithm optimization",
+  "hypothesis": "Baseline: converged from 28 evaluated individuals across 4 generations",
+  "category": "baseline",
+  "parent_id": null,
+  "config": {
+    "tex_slat_guidance_strength": 12.0,
+    "tex_slat_guidance_rescale": 1.0,
+    "tex_slat_sampling_steps": 16,
+    "tex_slat_rescale_t": 4.0,
+    "shape_slat_guidance_strength": 10.0,
+    "shape_slat_guidance_rescale": 0.5,
+    "shape_slat_sampling_steps": 16,
+    "ss_guidance_strength": 10.0,
+    "ss_guidance_rescale": 0.8,
+    "resolution": "1024",
+    "multiview_mode": "concat",
+    "texture_multiview_mode": "tapa",
+    "remesh_project": 0.9,
+    "ss_rescale_t": 5.0,
+    "shape_slat_rescale_t": 3.0,
+    "cfg_mode": "standard",
+    "guidance_schedule": "binary",
+    "postprocess": {
+      "normal_map_baking": true,
+      "ao_map": true,
+      "ao_rays": 16,
+      "ao_radius": 0.03,
+      "ao_strength": 0.2,
+      "metallic_clamp": 0.05,
+      "normal_strength": 0.7,
+      "normal_blur_sigma": 1.5,
+      "min_roughness": 0.2,
+      "fill_holes": 0.03
+    }
+  },
+  "changes_from_parent": null,
+  "scores": {
+    "overall": 37.81,
+    "scoring_version": "v2 (7-dimension, 100 pts total)",
+    "per_dimension": {
+      "silhouette": "~9-15",
+      "contour": "~9-15",
+      "color": "~35-45",
+      "detail": "~20-25",
+      "artifacts": "~85-95",
+      "smoothness": "~15-25",
+      "coherence": "~15-25"
+    },
+    "notes": "v2 scoring is stricter than v1 (v1 champion was 52.2). Dimensions are: Silhouette(20), Contour(15), Color(15), Detail(10), Artifacts(15), Smoothness(15), Coherence(10)"
+  },
+  "key_findings": {
+    "tex_slat_guidance_rescale": "1.0 is THE most important param - all top configs use 0.95-1.0",
+    "tex_slat_guidance_strength": "10-12 much higher than original 5.0",
+    "tex_slat_sampling_steps": "16 consistently better than 12",
+    "tex_slat_rescale_t": "4.0 better than default 3.0",
+    "ss_guidance_rescale": "0.8 fully converged",
+    "shape_slat_params": "negligible impact - shape determined by Stage 1"
+  },
+  "status": "completed",
+  "notes": "This is the reference baseline for all future adjustments. APG/beta/CFG-Zero* were tested and found negligible in v1."
+}

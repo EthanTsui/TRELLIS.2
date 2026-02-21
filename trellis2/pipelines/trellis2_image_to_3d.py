@@ -1078,6 +1078,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         multiview_mode: str = 'multidiffusion',
         texture_multiview_mode: Optional[str] = None,
         custom_yaw_angles: Optional[list] = None,
+        best_of_n: int = 1,
+        quality_verifier = None,
     ) -> List[MeshWithVoxel]:
         """
         Run the pipeline.
@@ -1102,7 +1104,77 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                                           Options: 'concat', 'view_weighted', 'single' (front-view only),
                                           'tapa' (TAPA: concat for t>0.5, single for t<=0.5),
                                           'multidiffusion'. If None, defaults to 'single'.
+            best_of_n (int): Generate N candidates and return the best one (1 = no selection).
+            quality_verifier: QualityVerifier instance for scoring candidates. Required when best_of_n > 1.
         """
+        # --- Best-of-N selection loop ---
+        if best_of_n > 1 and quality_verifier is not None:
+            # Preprocess once before the loop to avoid redundant work
+            if preprocess_image:
+                if isinstance(image, Image.Image):
+                    image = self.preprocess_image(image)
+                elif isinstance(image, dict):
+                    image = {k: self.preprocess_image(v) for k, v in image.items()}
+
+            # Extract reference image for scoring
+            if isinstance(image, Image.Image):
+                ref_image = image
+            elif isinstance(image, dict):
+                ref_image = image.get('front', next(iter(image.values())))
+            else:
+                ref_image = image
+
+            best_result = None
+            best_score = -float('inf')
+            all_scores = []
+
+            for i in range(best_of_n):
+                print(f"[Best-of-{best_of_n}] Generating candidate {i+1}/{best_of_n} (seed={seed+i})")
+                result = self.run(
+                    image,
+                    num_samples=num_samples,
+                    seed=seed + i,
+                    sparse_structure_sampler_params=sparse_structure_sampler_params,
+                    shape_slat_sampler_params=shape_slat_sampler_params,
+                    tex_slat_sampler_params=tex_slat_sampler_params,
+                    preprocess_image=False,  # already preprocessed
+                    return_latent=return_latent,
+                    pipeline_type=pipeline_type,
+                    max_num_tokens=max_num_tokens,
+                    multiview_mode=multiview_mode,
+                    texture_multiview_mode=texture_multiview_mode,
+                    custom_yaw_angles=custom_yaw_angles,
+                    best_of_n=1,  # prevent recursion
+                )
+
+                if return_latent:
+                    meshes, latents = result
+                else:
+                    meshes = result
+
+                mesh = meshes[0]
+                score_dict = quality_verifier.score(mesh, ref_image)
+                all_scores.append(score_dict)
+                print(f"  Candidate {i+1}: total={score_dict['total']:.3f} "
+                      f"(lpips={score_dict['lpips']:.3f}, geo={score_dict['geometric']:.3f}, "
+                      f"color={score_dict['color_richness']:.3f})")
+
+                if score_dict['total'] > best_score:
+                    old_result = best_result
+                    best_result = result
+                    best_score = score_dict['total']
+                    del old_result
+                else:
+                    del result
+
+                # Drop local references before cache cleanup
+                del meshes, mesh
+                if return_latent:
+                    del latents
+                torch.cuda.empty_cache()
+
+            print(f"[Best-of-{best_of_n}] Selected best candidate: score={best_score:.3f}")
+            return best_result
         # Single image: delegate directly
         if isinstance(image, Image.Image):
             return self._run_single(

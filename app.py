@@ -16,6 +16,8 @@ from trellis2.modules.sparse import SparseTensor
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
 from trellis2.renderers import EnvMap
 from trellis2.utils import render_utils
+from trellis2.utils.quality_verifier import QualityVerifier
+from trellis2.postprocessing.texture_refiner import TextureRefiner
 import o_voxel
 
 
@@ -323,7 +325,8 @@ def preprocess_image(image: Image.Image) -> Image.Image:
 
 
 def pack_state(latents: Tuple[SparseTensor, SparseTensor, int],
-               input_images: List = None, camera_params: List[dict] = None) -> dict:
+               input_images: List = None, camera_params: List[dict] = None,
+               ref_image=None) -> dict:
     shape_slat, tex_slat, res = latents
     state = {
         'shape_slat_feats': shape_slat.feats.cpu().numpy(),
@@ -334,6 +337,11 @@ def pack_state(latents: Tuple[SparseTensor, SparseTensor, int],
     if input_images is not None and camera_params is not None:
         state['input_images'] = [np.array(img) for img in input_images]
         state['camera_params'] = camera_params
+    if ref_image is not None:
+        if isinstance(ref_image, Image.Image):
+            state['ref_image'] = np.array(ref_image)
+        else:
+            state['ref_image'] = np.array(ref_image)
     return state
     
     
@@ -435,6 +443,7 @@ def image_to_3d(
     tex_slat_cfg_mp_strength: float,
     tex_slat_heun_steps: int,
     multistep: bool,
+    best_of_n: int,
     back_image: Optional[Image.Image],
     left_image: Optional[Image.Image],
     right_image: Optional[Image.Image],
@@ -467,6 +476,8 @@ def image_to_3d(
             run_input = pipeline.preprocess_image(image)
 
     # --- Sampling ---
+    best_of_n_int = int(best_of_n)
+    verifier = quality_verifier if best_of_n_int > 1 else None
     outputs, latents = pipeline.run(
         run_input,
         seed=seed,
@@ -503,6 +514,8 @@ def image_to_3d(
         multiview_mode=multiview_mode,
         texture_multiview_mode=texture_multiview_mode,
         custom_yaw_angles=parse_custom_yaw_angles(custom_angles) if multiview_layout == "Custom Angles" else None,
+        best_of_n=best_of_n_int,
+        quality_verifier=verifier,
     )
     mesh = outputs[0]
     mesh.simplify(16777216) # nvdiffrast limit
@@ -520,7 +533,13 @@ def image_to_3d(
             from trellis2.utils.visibility import get_camera_params_from_views
             mv_cam_params = get_camera_params_from_views(list(run_input.keys()))
 
-    state = pack_state(latents, input_images=mv_images, camera_params=mv_cam_params)
+    # Determine the reference (front) image for texture refinement
+    if isinstance(run_input, dict):
+        ref_img = run_input.get('front', next(iter(run_input.values())))
+    else:
+        ref_img = run_input
+
+    state = pack_state(latents, input_images=mv_images, camera_params=mv_cam_params, ref_image=ref_img)
     torch.cuda.empty_cache()
     
     # --- HTML Construction ---
@@ -593,6 +612,8 @@ def extract_glb(
     state: dict,
     decimation_target: int,
     texture_size: int,
+    enable_texture_refinement: bool,
+    texture_refine_iters: int,
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> Tuple[str, str]:
@@ -603,6 +624,8 @@ def extract_glb(
         state (dict): The state of the generated 3D model.
         decimation_target (int): The target face count for decimation.
         texture_size (int): The texture resolution.
+        enable_texture_refinement (bool): Whether to refine texture via render-and-compare.
+        texture_refine_iters (int): Number of refinement iterations.
 
     Returns:
         str: The path to the extracted GLB file.
@@ -617,6 +640,11 @@ def extract_glb(
     if 'input_images' in state and 'camera_params' in state:
         mv_images = [Image.fromarray(arr) for arr in state['input_images']]
         mv_cam_params = state['camera_params']
+
+    # Retrieve front reference image for texture refinement
+    ref_image = None
+    if 'ref_image' in state:
+        ref_image = Image.fromarray(state['ref_image'])
 
     glb = o_voxel.postprocess.to_glb(
         vertices=mesh.vertices,
@@ -639,6 +667,25 @@ def extract_glb(
         use_tqdm=True,
         verbose=True,
     )
+
+    # Texture refinement via render-and-compare
+    if enable_texture_refinement and ref_image is not None:
+        try:
+            if mv_images and mv_cam_params and len(mv_images) >= 2:
+                glb = texture_refiner.refine_multiview(
+                    glb, mv_images, mv_cam_params,
+                    num_iters=int(texture_refine_iters),
+                    verbose=True,
+                )
+            else:
+                glb = texture_refiner.refine(
+                    glb, ref_image,
+                    num_iters=int(texture_refine_iters),
+                    verbose=True,
+                )
+        except Exception as e:
+            print(f"[TextureRefiner] Warning: refinement failed ({e}), using original texture")
+
     now = datetime.now()
     timestamp = now.strftime("%Y-%m-%dT%H%M%S") + f".{now.microsecond // 1000:03d}"
     os.makedirs(user_dir, exist_ok=True)
@@ -727,11 +774,15 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                     tex_slat_cfg_mp_strength = gr.Slider(0.0, 0.5, label="CFG-MP Strength", value=0.15, step=0.01)
                     tex_slat_heun_steps = gr.Slider(0, 8, label="Heun Steps (final)", value=4, step=1)
                 multistep = gr.Checkbox(label="AB2 Multistep (free 2nd-order accuracy)", value=True)
+                best_of_n = gr.Slider(1, 8, label="Best-of-N (generate N candidates, pick best)", value=1, step=1)
 
         with gr.Column(scale=10):
             with gr.Walkthrough(selected=0) as walkthrough:
                 with gr.Step("Preview", id=0):
                     preview_output = gr.HTML(empty_html, label="3D Asset Preview", show_label=True, container=True)
+                    with gr.Row():
+                        enable_texture_refinement = gr.Checkbox(label="Texture Refinement (render-and-compare)", value=False)
+                        texture_refine_iters = gr.Slider(10, 100, label="Refinement Iterations", value=50, step=10)
                     extract_btn = gr.Button("Extract GLB")
                 with gr.Step("Extract", id=1):
                     glb_output = gr.Model3D(label="Extracted GLB", height=724, show_label=True, display_mode="solid", clear_color=(0.25, 0.25, 0.25, 1.0))
@@ -773,7 +824,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t, tex_slat_cfg_mp_strength, tex_slat_heun_steps,
-            multistep,
+            multistep, best_of_n,
             back_image, left_image, right_image, top_image, bottom_image,
             multiview_layout, multiview_mode, texture_multiview_mode, custom_angles,
         ],
@@ -784,7 +835,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         lambda: gr.Walkthrough(selected=1), outputs=walkthrough
     ).then(
         extract_glb,
-        inputs=[output_buf, decimation_target, texture_size],
+        inputs=[output_buf, decimation_target, texture_size, enable_texture_refinement, texture_refine_iters],
         outputs=[glb_output, download_btn],
     )
         
@@ -801,6 +852,9 @@ if __name__ == "__main__":
 
     pipeline = Trellis2ImageTo3DPipeline.from_pretrained('microsoft/TRELLIS.2-4B')
     pipeline.cuda()
+
+    quality_verifier = QualityVerifier(device='cuda')
+    texture_refiner = TextureRefiner(device='cuda')
     
     envmap = {
         'forest': EnvMap(torch.tensor(

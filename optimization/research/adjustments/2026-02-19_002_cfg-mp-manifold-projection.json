@@ -1,0 +1,44 @@
+{
+  "id": "2026-02-19_002",
+  "timestamp": "2026-02-19T12:00:00Z",
+  "description": "CFG-MP Manifold Projection - Project Euler step results back toward data manifold",
+  "hypothesis": "High CFG guidance causes the ODE trajectory to drift off the learned data manifold. By projecting each Euler step result back toward the on-manifold interpolation (computed from pred_x_0 and estimated noise), we can reduce off-manifold artifacts while preserving guidance strength. This addresses a fundamentally different failure mode than CFG-Zero* (scale) or APG (direction).",
+  "category": "guidance",
+  "parent_id": "2026-02-19_000",
+  "config": {
+    "tex_slat_guidance_strength": 12.0,
+    "tex_slat_guidance_rescale": 1.0,
+    "tex_slat_sampling_steps": 16,
+    "tex_slat_rescale_t": 4.0,
+    "tex_slat_cfg_mp_strength": 0.15,
+    "shape_slat_guidance_strength": 10.0,
+    "shape_slat_guidance_rescale": 0.5,
+    "shape_slat_sampling_steps": 16,
+    "ss_guidance_strength": 10.0,
+    "ss_guidance_rescale": 0.8,
+    "resolution": "1024",
+    "multiview_mode": "concat",
+    "texture_multiview_mode": "tapa"
+  },
+  "changes_from_parent": {
+    "tex_slat_cfg_mp_strength": {"old": 0.0, "new": 0.15}
+  },
+  "implementation": {
+    "file": "trellis2/pipelines/samplers/flow_euler.py",
+    "location": "FlowEulerSampler.sample() loop, after sample_once()",
+    "lines_added": 10,
+    "technique": "Noise-space re-interpolation from pred_x_0 at t_prev, then linear blend toward manifold",
+    "formula": "x_manifold = (sigma_t_prev/sigma_t)*x_t + ((1-t_prev)-(1-t)*sigma_t_prev/sigma_t)*pred_x_0; x_new = x_euler + lambda*(x_manifold - x_euler)"
+  },
+  "parameter_sweep_plan": {
+    "cfg_mp_strength_values": [0.05, 0.1, 0.15, 0.2, 0.3],
+    "notes": "Start with 0.15, sweep to find optimal. Higher values = stronger projection but may over-smooth."
+  },
+  "scores": {
+    "overall": null,
+    "scoring_version": "v2 (7-dimension, 100 pts total)",
+    "notes": "Pending evaluation. Recommend sweeping cfg_mp_strength in [0.05, 0.3]"
+  },
+  "status": "pending",
+  "notes": "Paper: arXiv 2601.21892 (Jan 2025). Validated on DiT-XL-2-256, Flux, SD3.5. Different mechanism from already-tested CFG-Zero*/APG. Default off (0.0) for backward compatibility. Passed via tex_slat_sampler_params kwargs."
+}

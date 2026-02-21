@@ -1,0 +1,55 @@
+{
+  "id": "2026-02-19_001",
+  "timestamp": "2026-02-19T12:00:00Z",
+  "description": "UV Seam Smoothing - Gaussian blur in narrow band around UV island boundaries",
+  "hypothesis": "UV seam artifacts are caused by color discontinuities at UV island boundaries in texture space. Smoothing a narrow band (3-5 texels) at these boundaries should reduce visible seams without affecting interior texture quality.",
+  "category": "postprocess",
+  "parent_id": "2026-02-19_000",
+  "config": {
+    "tex_slat_guidance_strength": 12.0,
+    "tex_slat_guidance_rescale": 1.0,
+    "tex_slat_sampling_steps": 16,
+    "tex_slat_rescale_t": 4.0,
+    "shape_slat_guidance_strength": 10.0,
+    "shape_slat_guidance_rescale": 0.5,
+    "shape_slat_sampling_steps": 16,
+    "ss_guidance_strength": 10.0,
+    "ss_guidance_rescale": 0.8,
+    "resolution": "1024",
+    "multiview_mode": "concat",
+    "texture_multiview_mode": "tapa",
+    "postprocess": {
+      "uv_seam_smoothing": true,
+      "uv_seam_kernel_boundary": 3,
+      "uv_seam_kernel_dilate": 5,
+      "uv_seam_blur_kernel": 7,
+      "uv_seam_blur_sigma": 1.5,
+      "normal_map_baking": true,
+      "ao_map": true,
+      "ao_rays": 16,
+      "ao_radius": 0.03,
+      "ao_strength": 0.2,
+      "metallic_clamp": 0.05,
+      "normal_strength": 0.7,
+      "normal_blur_sigma": 1.5,
+      "min_roughness": 0.2,
+      "fill_holes": 0.03
+    }
+  },
+  "changes_from_parent": {
+    "uv_seam_smoothing": {"old": false, "new": true}
+  },
+  "implementation": {
+    "file": "o-voxel/o_voxel/postprocess.py",
+    "location": "After inpainting, before dark texel recovery",
+    "lines_added": 28,
+    "technique": "Erosion-based UV island boundary detection + Gaussian blur in dilated seam band"
+  },
+  "scores": {
+    "overall": null,
+    "scoring_version": "v2 (7-dimension, 100 pts total)",
+    "notes": "Pending evaluation"
+  },
+  "status": "pending",
+  "notes": "Pure post-processing change, zero risk. Smooths base_color, normal_map, metallic, and roughness at UV island boundaries. Expected +1-2 points on smoothness/coherence."
+}
