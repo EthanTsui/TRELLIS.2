@@ -322,14 +322,19 @@ def preprocess_image(image: Image.Image) -> Image.Image:
     return processed_image
 
 
-def pack_state(latents: Tuple[SparseTensor, SparseTensor, int]) -> dict:
+def pack_state(latents: Tuple[SparseTensor, SparseTensor, int],
+               input_images: List = None, camera_params: List[dict] = None) -> dict:
     shape_slat, tex_slat, res = latents
-    return {
+    state = {
         'shape_slat_feats': shape_slat.feats.cpu().numpy(),
         'tex_slat_feats': tex_slat.feats.cpu().numpy(),
         'coords': shape_slat.coords.cpu().numpy(),
         'res': res,
     }
+    if input_images is not None and camera_params is not None:
+        state['input_images'] = [np.array(img) for img in input_images]
+        state['camera_params'] = camera_params
+    return state
     
     
 def unpack_state(state: dict) -> Tuple[SparseTensor, SparseTensor, int]:
@@ -348,6 +353,69 @@ def get_seed(randomize_seed: bool, seed: int) -> int:
     return np.random.randint(0, MAX_SEED) if randomize_seed else seed
 
 
+# Multi-view composite image layouts: (rows, cols, view_names)
+MULTIVIEW_LAYOUTS = {
+    "Single Image": None,
+    "2x3 Grid (6 views)": (2, 3, ['front', 'right', 'back', 'left', 'top', 'bottom']),
+    "3x2 Grid (6 views)": (3, 2, ['front', 'back', 'left', 'right', 'top', 'bottom']),
+    "1x3 Strip (3 views)": (1, 3, ['front', 'left', 'right']),
+    "1x3 Strip 120° (3 views)": (1, 3, ['front', 'left_120', 'right_120']),
+    "1x3 Strip 45° (3 views)": (1, 3, ['front', 'front_left', 'front_right']),
+    "2x2 Grid (4 views)": (2, 2, ['front', 'right', 'back', 'left']),
+    "2x2 Grid diagonal (4 views)": (2, 2, ['front_left', 'front_right', 'back_left', 'back_right']),
+    "Custom Angles": "custom",
+}
+
+
+def split_composite_image(image: Image.Image, layout: str, custom_angles: str = "") -> Dict[str, Image.Image]:
+    """Split a composite multi-view image into individual view images."""
+    spec = MULTIVIEW_LAYOUTS.get(layout)
+    if spec is None:
+        return {}
+    if spec == "custom":
+        return _split_custom_angles(image, custom_angles)
+    rows, cols, view_names = spec
+    w, h = image.size
+    cell_w, cell_h = w // cols, h // rows
+    views = {}
+    for idx, name in enumerate(view_names):
+        r, c = divmod(idx, cols)
+        box = (c * cell_w, r * cell_h, (c + 1) * cell_w, (r + 1) * cell_h)
+        views[name] = image.crop(box)
+    return views
+
+
+def _split_custom_angles(image: Image.Image, angles_str: str) -> Dict[str, Image.Image]:
+    """Split composite image using custom yaw angles (degrees, comma-separated)."""
+    if not angles_str or not angles_str.strip():
+        return {}
+    try:
+        angles = [float(a.strip()) for a in angles_str.split(",") if a.strip()]
+    except ValueError:
+        return {}
+    if len(angles) < 2:
+        return {}
+    n = len(angles)
+    w, h = image.size
+    cell_w = w // n
+    views = {}
+    for i, angle in enumerate(angles):
+        box = (i * cell_w, 0, (i + 1) * cell_w, h)
+        views[f"custom_{i}"] = image.crop(box)
+    return views
+
+
+def parse_custom_yaw_angles(angles_str: str) -> list:
+    """Parse comma-separated yaw angles (degrees) into list of floats (radians)."""
+    import math
+    if not angles_str or not angles_str.strip():
+        return []
+    try:
+        return [math.radians(float(a.strip())) for a in angles_str.split(",") if a.strip()]
+    except ValueError:
+        return []
+
+
 def image_to_3d(
     image: Image.Image,
     seed: int,
@@ -364,12 +432,41 @@ def image_to_3d(
     tex_slat_guidance_rescale: float,
     tex_slat_sampling_steps: int,
     tex_slat_rescale_t: float,
+    tex_slat_cfg_mp_strength: float,
+    back_image: Optional[Image.Image],
+    left_image: Optional[Image.Image],
+    right_image: Optional[Image.Image],
+    top_image: Optional[Image.Image],
+    bottom_image: Optional[Image.Image],
+    multiview_layout: str,
+    multiview_mode: str,
+    texture_multiview_mode: str,
+    custom_angles: str,
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> str:
+    # Option 1: Auto-split composite image based on layout
+    composite_views = split_composite_image(image, multiview_layout, custom_angles)
+
+    if composite_views:
+        run_input = {k: pipeline.preprocess_image(v) for k, v in composite_views.items()}
+    else:
+        # Option 2: Manual extra views from accordion
+        extra_views = {
+            'back': back_image, 'left': left_image, 'right': right_image,
+            'top': top_image, 'bottom': bottom_image,
+        }
+        extra_views = {k: v for k, v in extra_views.items() if v is not None}
+
+        if extra_views:
+            extra_views = {k: pipeline.preprocess_image(v) for k, v in extra_views.items()}
+            run_input = {'front': pipeline.preprocess_image(image), **extra_views}
+        else:
+            run_input = pipeline.preprocess_image(image)
+
     # --- Sampling ---
     outputs, latents = pipeline.run(
-        image,
+        run_input,
         seed=seed,
         preprocess_image=False,
         sparse_structure_sampler_params={
@@ -389,6 +486,7 @@ def image_to_3d(
             "guidance_strength": tex_slat_guidance_strength,
             "guidance_rescale": tex_slat_guidance_rescale,
             "rescale_t": tex_slat_rescale_t,
+            "cfg_mp_strength": tex_slat_cfg_mp_strength,
         },
         pipeline_type={
             "512": "512",
@@ -396,11 +494,27 @@ def image_to_3d(
             "1536": "1536_cascade",
         }[resolution],
         return_latent=True,
+        multiview_mode=multiview_mode,
+        texture_multiview_mode=texture_multiview_mode,
+        custom_yaw_angles=parse_custom_yaw_angles(custom_angles) if multiview_layout == "Custom Angles" else None,
     )
     mesh = outputs[0]
     mesh.simplify(16777216) # nvdiffrast limit
     images = render_utils.render_snapshot(mesh, resolution=1024, r=2, fov=36, nviews=STEPS, envmap=envmap)
-    state = pack_state(latents)
+
+    # Save multi-view images and camera params for texture projection in extract_glb
+    mv_images = None
+    mv_cam_params = None
+    if isinstance(run_input, dict) and len(run_input) >= 2:
+        mv_images = list(run_input.values())
+        custom_yaws = parse_custom_yaw_angles(custom_angles) if multiview_layout == "Custom Angles" else None
+        if custom_yaws and len(custom_yaws) == len(run_input):
+            mv_cam_params = [{'yaw': y, 'pitch': 0.0} for y in custom_yaws]
+        else:
+            from trellis2.utils.visibility import get_camera_params_from_views
+            mv_cam_params = get_camera_params_from_views(list(run_input.keys()))
+
+    state = pack_state(latents, input_images=mv_images, camera_params=mv_cam_params)
     torch.cuda.empty_cache()
     
     # --- HTML Construction ---
@@ -490,6 +604,14 @@ def extract_glb(
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
     shape_slat, tex_slat, res = unpack_state(state)
     mesh = pipeline.decode_latent(shape_slat, tex_slat, res)[0]
+
+    # Retrieve multi-view images and camera params for texture projection
+    mv_images = None
+    mv_cam_params = None
+    if 'input_images' in state and 'camera_params' in state:
+        mv_images = [Image.fromarray(arr) for arr in state['input_images']]
+        mv_cam_params = state['camera_params']
+
     glb = o_voxel.postprocess.to_glb(
         vertices=mesh.vertices,
         faces=mesh.faces,
@@ -502,14 +624,20 @@ def extract_glb(
         texture_size=texture_size,
         remesh=True,
         remesh_band=1,
-        remesh_project=0,
+        remesh_project=0.9,
+        max_metallic=0.05,
+        min_roughness=0.4,
+        enable_normal_map=False,
+        enable_ao=False,
+        enable_grey_recovery=True,
         use_tqdm=True,
+        verbose=True,
     )
     now = datetime.now()
     timestamp = now.strftime("%Y-%m-%dT%H%M%S") + f".{now.microsecond // 1000:03d}"
     os.makedirs(user_dir, exist_ok=True)
     glb_path = os.path.join(user_dir, f'sample_{timestamp}.glb')
-    glb.export(glb_path, extension_webp=True)
+    glb.export(glb_path)
     torch.cuda.empty_cache()
     return glb_path, glb_path
 
@@ -530,28 +658,67 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             randomize_seed = gr.Checkbox(label="Randomize Seed", value=True)
             decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)
             texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
-            
+
+            multiview_layout = gr.Dropdown(
+                choices=list(MULTIVIEW_LAYOUTS.keys()),
+                value="Single Image",
+                label="Multi-View Layout",
+                info="If your image contains multiple views in a grid, select the layout to auto-split.",
+            )
+
+            custom_angles = gr.Textbox(
+                label="Custom Yaw Angles (degrees)",
+                placeholder="e.g. 0, 120, -120",
+                info="For 'Custom Angles' layout: comma-separated yaw angles in degrees. 0=front, 90=left, -90=right, 180=back.",
+                visible=True,
+            )
+
+            multiview_mode = gr.Radio(
+                choices=["concat", "view_weighted", "multidiffusion", "stochastic"],
+                value="concat",
+                label="Multi-View Mode",
+                info="Concat: cross-attn feature concatenation. View Weighted: per-view cross-attn with visibility merge (best separation). Multidiffusion: average K predictions. Stochastic: cycles views.",
+            )
+
+            texture_multiview_mode = gr.Radio(
+                choices=["single", "concat", "view_weighted", "tapa", "multidiffusion"],
+                value="single",
+                label="Texture Multi-View Mode",
+                info="Single: front-view only (safest). Concat: all views. View Weighted: per-view cross-attn with visibility merge. TAPA: concat then single. Multidiffusion: average.",
+            )
+
+            with gr.Accordion("Additional Views (Optional)", open=False):
+                gr.Markdown("Upload extra views to improve quality. Main image = front view. Ignored when a multi-view layout is selected above.")
+                with gr.Row():
+                    back_image = gr.Image(label="Back", format="png", image_mode="RGBA", type="pil", height=200)
+                    left_image = gr.Image(label="Left", format="png", image_mode="RGBA", type="pil", height=200)
+                    right_image = gr.Image(label="Right", format="png", image_mode="RGBA", type="pil", height=200)
+                with gr.Row():
+                    top_image = gr.Image(label="Top", format="png", image_mode="RGBA", type="pil", height=200)
+                    bottom_image = gr.Image(label="Bottom", format="png", image_mode="RGBA", type="pil", height=200)
+
             generate_btn = gr.Button("Generate")
                 
             with gr.Accordion(label="Advanced Settings", open=False):                
                 gr.Markdown("Stage 1: Sparse Structure Generation")
                 with gr.Row():
-                    ss_guidance_strength = gr.Slider(1.0, 10.0, label="Guidance Strength", value=7.5, step=0.1)
-                    ss_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=0.7, step=0.01)
+                    ss_guidance_strength = gr.Slider(1.0, 15.0, label="Guidance Strength", value=10.0, step=0.1)
+                    ss_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=0.8, step=0.01)
                     ss_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=12, step=1)
                     ss_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=5.0, step=0.1)
                 gr.Markdown("Stage 2: Shape Generation")
                 with gr.Row():
-                    shape_slat_guidance_strength = gr.Slider(1.0, 10.0, label="Guidance Strength", value=7.5, step=0.1)
+                    shape_slat_guidance_strength = gr.Slider(1.0, 15.0, label="Guidance Strength", value=10.0, step=0.1)
                     shape_slat_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=0.5, step=0.01)
                     shape_slat_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=12, step=1)
                     shape_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=3.0, step=0.1)
                 gr.Markdown("Stage 3: Material Generation")
                 with gr.Row():
-                    tex_slat_guidance_strength = gr.Slider(1.0, 10.0, label="Guidance Strength", value=1.0, step=0.1)
-                    tex_slat_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=0.0, step=0.01)
-                    tex_slat_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=12, step=1)
-                    tex_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=3.0, step=0.1)                
+                    tex_slat_guidance_strength = gr.Slider(1.0, 15.0, label="Guidance Strength", value=12.0, step=0.1)
+                    tex_slat_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=1.0, step=0.01)
+                    tex_slat_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=16, step=1)
+                    tex_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=4.0, step=0.1)
+                    tex_slat_cfg_mp_strength = gr.Slider(0.0, 0.5, label="CFG-MP Strength", value=0.15, step=0.01)
 
         with gr.Column(scale=10):
             with gr.Walkthrough(selected=0) as walkthrough:
@@ -582,11 +749,8 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     demo.load(start_session)
     demo.unload(end_session)
     
-    image_prompt.upload(
-        preprocess_image,
-        inputs=[image_prompt],
-        outputs=[image_prompt],
-    )
+    # NOTE: No preprocessing on upload — all preprocessing happens in image_to_3d
+    # This avoids the race condition where layout selection hasn't propagated yet
 
     generate_btn.click(
         get_seed,
@@ -600,7 +764,9 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             image_prompt, seed, resolution,
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
-            tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t,
+            tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t, tex_slat_cfg_mp_strength,
+            back_image, left_image, right_image, top_image, bottom_image,
+            multiview_layout, multiview_mode, texture_multiview_mode, custom_angles,
         ],
         outputs=[output_buf, preview_output],
     )

@@ -1,0 +1,420 @@
+{
+  "version": "2.0",
+  "description": "Discovered techniques and approaches for quality improvement. Updated 2026-02-19 with comprehensive literature survey.",
+  "methods": [
+    {
+      "id": "cfg-rescale-interaction",
+      "name": "CFG Guidance x Rescale Interaction",
+      "category": "generation",
+      "description": "Higher CFG guidance works better with higher rescale (0.95). Low rescale with high guidance is the worst combination. The interaction is non-linear.",
+      "source": "empirical (Phase 2 sweep)",
+      "status": "confirmed",
+      "impact": "medium",
+      "implementation_effort": "trivial",
+      "details": {
+        "best_combo": {"tex_guidance": 3.0, "tex_rescale": 0.95},
+        "improvement": "+1.6 avg points over baseline",
+        "pattern": "rescale importance increases with guidance level"
+      },
+      "date_discovered": "2026-02-16"
+    },
+    {
+      "id": "sparse-boundary-fallback",
+      "name": "Sparse Boundary Nearest-Neighbor Fallback",
+      "category": "post-processing",
+      "description": "grid_sample_3d at sparse voxel boundaries interpolates toward zero. Fix: detect dark texels near boundary and replace with nearest valid neighbor.",
+      "source": "R12 postprocess improvements",
+      "status": "implemented",
+      "impact": "high",
+      "implementation_effort": "low",
+      "details": {
+        "file": "o-voxel/o_voxel/postprocess.py",
+        "improvement": "+2.4 points (R10->R12)"
+      },
+      "date_discovered": "2026-02-14"
+    },
+    {
+      "id": "bilateral-sharpen",
+      "name": "Bilateral Filter Sharpening",
+      "category": "post-processing",
+      "description": "Use bilateral filter (edge-preserving) instead of Gaussian for texture sharpening. CLAHE is bad for 3D textures (too much local noise).",
+      "source": "R10 postprocess improvements",
+      "status": "implemented",
+      "impact": "medium",
+      "implementation_effort": "low",
+      "details": {
+        "params": {"detail_factor": 0.6, "sigmaColor": 40},
+        "order": "HF inject BEFORE sharpen, cleanup after every noise op"
+      },
+      "date_discovered": "2026-02-14"
+    },
+    {
+      "id": "normal-map-baking",
+      "name": "Tangent-Space Normal Map Baking",
+      "category": "post-processing",
+      "description": "Bake normal maps from high-res mesh to simplified mesh. Uses BVH closest-point lookup + tangent frame projection.",
+      "source": "3D vision expert recommendation",
+      "status": "implemented",
+      "impact": "high",
+      "implementation_effort": "medium",
+      "details": {
+        "file": "o-voxel/o_voxel/postprocess.py:286-384",
+        "improvement": "+5.5 pts avg in previous manual tests"
+      },
+      "date_discovered": "2026-02-14"
+    },
+    {
+      "id": "render-and-compare",
+      "name": "nvdiffrast Render-and-Compare Texture Optimization",
+      "category": "post-processing",
+      "description": "Use differentiable rendering (nvdiffrast) to optimize texture by comparing rendered views against input images. Iterative gradient descent on texture pixels. The single highest-impact improvement available without retraining.",
+      "source": "Meta 3D TextureGen, MVPaint, DiffTex, Paint3D, industry standard",
+      "status": "proposed",
+      "impact": "very_high",
+      "implementation_effort": "medium",
+      "details": {
+        "infrastructure": "nvdiffrast already in Dockerfile; need optimization loop with camera poses",
+        "expected_improvement": "+5-10 points on color/detail scores",
+        "losses": ["L1/L2 pixel", "perceptual (LPIPS/VGG)", "style (Gram matrix)", "texture smoothness"],
+        "optimizer": "Adam on texture map, 100-200 iterations",
+        "reference_section": "improvement_methods.md Section 2.6 / 5.1"
+      },
+      "date_discovered": "2026-02-16"
+    },
+    {
+      "id": "texture-super-resolution",
+      "name": "PBR-SR Zero-Shot Texture Super-Resolution",
+      "category": "post-processing",
+      "description": "Zero-shot PBR texture SR using DiffBIR + nvdiffrast multi-view consistency. Upscale from 2K to 4K+ with perceptual quality enhancement. No training needed.",
+      "source": "PBR-SR (NeurIPS 2025, arXiv 2506.02846)",
+      "status": "proposed",
+      "impact": "high",
+      "implementation_effort": "medium",
+      "details": {
+        "options": ["Real-ESRGAN (easy, general purpose)", "PBR-SR (better, PBR-specific)", "DiffBIR (ECCV 2024, blind restoration)"],
+        "expected_improvement": "+3-5 points on detail score, +1-2 on color",
+        "reference_section": "improvement_methods.md Section 2.2"
+      },
+      "date_discovered": "2026-02-16",
+      "date_updated": "2026-02-19"
+    },
+    {
+      "id": "uv-seam-smoothing",
+      "name": "UV Seam Laplacian Blending",
+      "category": "post-processing",
+      "description": "Smooth texture across UV seam boundaries using Laplacian blending. Identify UV seam edges, dilate texture past island boundaries, blend in narrow band (2-4 texels).",
+      "source": "Hunyuan3D 2.1, MVPaint UVR module",
+      "status": "proposed",
+      "impact": "medium",
+      "implementation_effort": "low",
+      "details": {
+        "approach": "Build UV adjacency map, average across-seam neighbors, Gaussian blur in narrow seam band",
+        "expected_improvement": "+1-2 points on smoothness/coherence",
+        "code_estimate": "~50 lines of Python",
+        "reference_section": "improvement_methods.md Section 5.2"
+      },
+      "date_discovered": "2026-02-16",
+      "date_updated": "2026-02-19"
+    },
+    {
+      "id": "tapa-multiview",
+      "name": "TAPA Smooth Multi-View Blending",
+      "category": "generation",
+      "description": "Smooth TAPA blending over [0.6, 0.8] range for texture multi-view. Better than hard switching.",
+      "source": "multiview experiments R3",
+      "status": "implemented",
+      "impact": "medium",
+      "implementation_effort": "trivial",
+      "date_discovered": "2026-02-14"
+    },
+    {
+      "id": "concat-multiview",
+      "name": "Cross-Attention Feature Concatenation",
+      "category": "generation",
+      "description": "Concatenate K views' DINOv3 features along sequence dim for cross-attention. Avoids velocity averaging problem entirely.",
+      "source": "DL researcher analysis + GaussianAnything (ICLR'25)",
+      "status": "implemented",
+      "impact": "high",
+      "implementation_effort": "low",
+      "details": {
+        "memory": "K=4 at 512 res = 5476 KV tokens vs ~50K Q tokens, feasible",
+        "risk": "OOD sequence length; mitigate with alpha=0.1-0.3 scaling"
+      },
+      "date_discovered": "2026-02-14"
+    },
+    {
+      "id": "cfg-mp-manifold-projection",
+      "name": "CFG-MP: Manifold Projection for Flow Matching",
+      "category": "guidance",
+      "description": "Reformulates CFG as homotopy optimization with manifold constraint. Projects sample back onto data manifold after each Euler step via incremental gradient descent. Uses Anderson Acceleration for efficiency. Unlike CFG-Zero*/APG, constrains the entire trajectory rather than just modifying guidance scale/direction.",
+      "source": "arXiv 2601.21892 (January 2025)",
+      "status": "proposed",
+      "impact": "medium-high",
+      "implementation_effort": "easy-medium",
+      "details": {
+        "key_advantage": "Addresses off-manifold drift, different mechanism from CFG-Zero*/APG which showed no effect",
+        "implementation": "5-15 lines in Euler sampling loop, no extra model evaluations",
+        "validated_on": "DiT-XL-2-256, Flux, Stable Diffusion 3.5",
+        "expected_improvement": "+2-4 points",
+        "reference_section": "improvement_methods.md Section 3.3"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "rectified-cfgpp",
+      "name": "Rectified-CFG++: Predictor-Corrector for Flow Models",
+      "category": "guidance",
+      "description": "Adaptive predictor-corrector guidance coupling rectified flow deterministic efficiency with geometry-aware conditioning. Each step: conditional RF update + weighted conditional correction. Bounded trajectory in data manifold tubular neighbourhood.",
+      "source": "CVPR Workshop on Generative Vision 2025, NeurIPS 2025",
+      "status": "proposed",
+      "impact": "medium",
+      "implementation_effort": "medium",
+      "details": {
+        "validated_on": "Flux, Stable Diffusion 3/3.5, Lumina",
+        "expected_improvement": "+1-3 points, especially at high guidance scales",
+        "reference_section": "improvement_methods.md Section 3.4"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "logit-normal-timesteps",
+      "name": "Logit-Normal Timestep Scheduling",
+      "category": "sampling",
+      "description": "Replace uniform timestep spacing in Euler ODE solver with logit-normal distribution concentrating steps around the critical transition region (t~0.5 where log SNR~0). Used in SD3 and Movie Gen training; applicable inference-time to any flow matching model.",
+      "source": "ICCV 2025, SD3 (Esser et al. 2024), Movie Gen (Polyak et al. 2024)",
+      "status": "proposed",
+      "impact": "medium",
+      "implementation_effort": "easy",
+      "details": {
+        "implementation": "3-5 lines change in timestep scheduling",
+        "rationale": "More ODE steps in critical region improves structural decisions",
+        "expected_improvement": "+1-3 points from better ODE trajectory",
+        "reference_section": "improvement_methods.md Section 3.5"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "detailgen3d",
+      "name": "DetailGen3D: Generative Geometry Enhancement",
+      "category": "geometry",
+      "description": "Models coarse-to-fine geometric transformation through data-dependent flows in latent space. Token matching for spatial correspondence during refinement. Inference takes seconds. DINO feature conditioning compatible with TRELLIS.2.",
+      "source": "arXiv 2411.16820, VAST AI Research, 2025",
+      "status": "proposed",
+      "impact": "high",
+      "implementation_effort": "medium",
+      "details": {
+        "code": "https://github.com/VAST-AI-Research/DetailGen3D",
+        "expected_improvement": "+3-5 points on detail and contour scores",
+        "reference_section": "improvement_methods.md Section 1.3"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "supercarver",
+      "name": "SuperCarver: Normal Diffusion Geometry SR",
+      "category": "geometry",
+      "description": "Prior-guided normal diffusion model for geometry super-resolution. Noise-resistant inverse rendering via deformable distance field. Adds micro-geometry detail lost in mesh simplification.",
+      "source": "arXiv 2503.09439, 2025",
+      "status": "proposed",
+      "impact": "medium-high",
+      "implementation_effort": "medium",
+      "details": {
+        "expected_improvement": "+2-4 points on detail/contour",
+        "reference_section": "improvement_methods.md Section 1.4"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "meshanything-v2",
+      "name": "MeshAnything V2: Clean Mesh Topology",
+      "category": "geometry",
+      "description": "Autoregressive transformer generating artist-quality mesh topology aligned to input shapes. Adjacent Mesh Tokenization (AMT) halves token sequence length. Up to 1600 faces.",
+      "source": "ICCV 2025, arXiv 2408.02555",
+      "status": "proposed",
+      "impact": "medium",
+      "implementation_effort": "medium",
+      "details": {
+        "code": "https://github.com/buaacyw/MeshAnythingV2",
+        "limitation": "1600-face limit may be too low for detailed objects",
+        "expected_improvement": "+1-3 points on quality, significant for production use",
+        "reference_section": "improvement_methods.md Section 1.5"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "material-anything",
+      "name": "Material Anything: Feed-Forward PBR Refinement",
+      "category": "texture",
+      "description": "Feed-forward PBR material generation using pre-trained diffusion model with triple-head architecture (albedo, roughness, metallic) and rendering loss. Confidence masks handle textured/texture-less objects. UV-space material refiner.",
+      "source": "CVPR 2025 Highlight, arXiv 2411.15138",
+      "status": "proposed",
+      "impact": "high",
+      "implementation_effort": "medium",
+      "details": {
+        "code": "https://github.com/3DTopia/MaterialAnything",
+        "expected_improvement": "+3-5 points on color/detail",
+        "reference_section": "improvement_methods.md Section 2.1"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "mvpaint-uvr",
+      "name": "MVPaint UV Refinement Module",
+      "category": "texture",
+      "description": "UV-space super-resolution + spatial-aware seam-smoothing from MVPaint. Addresses UV seams and texture resolution independently of generation method.",
+      "source": "CVPR 2025, arXiv 2411.02336",
+      "status": "proposed",
+      "impact": "high",
+      "implementation_effort": "medium",
+      "details": {
+        "code": "https://github.com/3DTopia/MVPaint",
+        "expected_improvement": "+3-5 points on texture coherence and seam quality",
+        "reference_section": "improvement_methods.md Section 2.3"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "3denhancer",
+      "name": "3DEnhancer: Multi-View Diffusion Enhancement",
+      "category": "texture",
+      "description": "DiT-based multi-view enhancement with row attention and epipolar aggregation. Text-prompt controllable, adjustable noise levels. Render from coarse 3D -> enhance -> reproject.",
+      "source": "CVPR 2025, arXiv 2412.18565",
+      "status": "proposed",
+      "impact": "very_high",
+      "implementation_effort": "hard",
+      "details": {
+        "code": "https://huggingface.co/Luo-Yihang/3DEnhancer",
+        "expected_improvement": "+5-8 points on all texture dimensions",
+        "reference_section": "improvement_methods.md Section 2.4"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "elevate3d",
+      "name": "Elevate3D: HFS-SDEdit Co-Refinement",
+      "category": "texture+geometry",
+      "description": "Frequency-separated SDEdit for iterative texture-geometry co-refinement. Diffusion freely generates low-freq content while constraining high-freq from input. Monocular geometry predictors for mesh refinement.",
+      "source": "SIGGRAPH 2025, arXiv 2507.11465",
+      "status": "proposed",
+      "impact": "high",
+      "implementation_effort": "medium-hard",
+      "details": {
+        "expected_improvement": "+3-6 points on detail/color, +1-2 on geometry",
+        "reference_section": "improvement_methods.md Section 1.7"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "3d-aware-rope",
+      "name": "3D-Aware RoPE Position Encoding",
+      "category": "architecture",
+      "description": "Inject 3D spatial information into rotary position embeddings for cross-view coherence. Significantly improves cross-view consistency and seamless texturing. Requires retraining.",
+      "source": "Hunyuan3D 2.1, arXiv 2506.15442",
+      "status": "proposed",
+      "impact": "high",
+      "implementation_effort": "hard",
+      "details": {
+        "requires_retraining": true,
+        "expected_improvement": "+3-5 points on coherence",
+        "reference_section": "improvement_methods.md Section 4.5"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "ms3d-multiscale",
+      "name": "MS3D: Multi-Scale Sparse Voxel Progressive Refinement",
+      "category": "architecture",
+      "description": "Progressive multi-scale modeling from low-res full latents to high-res sparse structured latents. Hierarchical latent aggregation for SDF extraction. The most architecturally relevant improvement for TRELLIS.2.",
+      "source": "ICCV 2025",
+      "status": "proposed",
+      "impact": "very_high",
+      "implementation_effort": "hard",
+      "details": {
+        "requires_retraining": true,
+        "expected_improvement": "+5-10 points on all geometry dimensions",
+        "reference_section": "improvement_methods.md Section 4.3"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "consistent-flow-distillation",
+      "name": "CFD: 3D-Consistent Noise for Flow Matching",
+      "category": "sampling",
+      "description": "Multi-view consistent Gaussian noise rendered from various viewpoints for consistent flow gradients. Applicable to TRELLIS.2's texture stage: use 3D noise field instead of independent per-voxel noise.",
+      "source": "ICLR 2025, OpenReview A51NEXIq1J",
+      "status": "proposed",
+      "impact": "medium",
+      "implementation_effort": "medium",
+      "details": {
+        "expected_improvement": "+1-3 points on texture coherence",
+        "reference_section": "improvement_methods.md Section 3.6"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "partuv-unwrapping",
+      "name": "PartUV: Part-Based UV Unwrapping",
+      "category": "post-processing",
+      "description": "Learned part priors + geometric cues for part-aligned UV charts. Reduces fragmentation vs xatlas, minimizes padding between charts, prevents color bleeding at lower resolutions.",
+      "source": "2025",
+      "status": "proposed",
+      "impact": "medium",
+      "implementation_effort": "medium",
+      "details": {
+        "replaces": "xatlas (current UV unwrapper)",
+        "advantage": "Semantically meaningful UV islands, fewer seams",
+        "expected_improvement": "+1-3 points on texture quality",
+        "reference_section": "improvement_methods.md Section 5.3"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "craftsman3d-refiner",
+      "name": "CraftsMan3D Normal-Based Geometry Refiner",
+      "category": "geometry",
+      "description": "Normal-based geometry refiner predicts per-vertex displacements guided by rendered multi-view normal maps. Can be applied automatically to any mesh.",
+      "source": "CVPR 2025, arXiv 2405.14979",
+      "status": "proposed",
+      "impact": "medium",
+      "implementation_effort": "medium",
+      "details": {
+        "code": "https://github.com/wyysf-98/CraftsMan3D",
+        "expected_improvement": "+2-3 points on silhouette/contour",
+        "reference_section": "improvement_methods.md Section 1.6"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "diffbir-texture-enhance",
+      "name": "DiffBIR: Blind Texture Restoration",
+      "category": "texture",
+      "description": "Two-stage blind image restoration: degradation removal + latent diffusion texture generation. Effective at natural textures and semantic preservation. The 2D prior backbone for PBR-SR.",
+      "source": "ECCV 2024, arXiv 2308.15070",
+      "status": "proposed",
+      "impact": "medium",
+      "implementation_effort": "easy",
+      "details": {
+        "code": "https://github.com/XPixelGroup/DiffBIR",
+        "expected_improvement": "+2-3 points on detail/color via render-enhance-reproject",
+        "reference_section": "improvement_methods.md Section 2.8"
+      },
+      "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "flashattention-3",
+      "name": "FlashAttention-3 Upgrade",
+      "category": "architecture",
+      "description": "Async + FP8 attention for Hopper/Blackwell GPUs. 1.5-2x speedup over FA2, enabling more sampling steps or higher resolution within same time budget.",
+      "source": "arXiv 2407.08608, 2024",
+      "status": "proposed",
+      "impact": "indirect",
+      "implementation_effort": "easy",
+      "details": {
+        "caveat": "Need to verify SM 12.1 (Blackwell) compatibility",
+        "current": "flash-attn v2.7.4",
+        "reference_section": "improvement_methods.md Section 4.1"
+      },
+      "date_discovered": "2026-02-19"
+    }
+  ]
+}

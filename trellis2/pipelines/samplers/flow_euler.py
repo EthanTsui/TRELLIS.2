@@ -111,14 +111,38 @@ class FlowEulerSampler(Sampler):
             - 'pred_x_t': a list of prediction of x_t.
             - 'pred_x_0': a list of prediction of x_0.
         """
+        # CFG-Zero*: skip first K ODE steps (zero velocity)
+        zero_init_steps = kwargs.pop('zero_init_steps', 0)
+        # CFG-MP: manifold projection strength (0=off, recommended 0.1-0.3)
+        cfg_mp_strength = kwargs.pop('cfg_mp_strength', 0.0)
+
         sample = noise
         t_seq = np.linspace(1, 0, steps + 1)
         t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
         t_seq = t_seq.tolist()
         t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
         ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
-        for t, t_prev in tqdm(t_pairs, desc=tqdm_desc, disable=not verbose):
+        for step_idx, (t, t_prev) in enumerate(tqdm(t_pairs, desc=tqdm_desc, disable=not verbose)):
+            if step_idx < zero_init_steps:
+                # CFG-Zero*: hold position for early steps
+                ret.pred_x_t.append(sample)
+                ret.pred_x_0.append(sample)
+                continue
             out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
+            if cfg_mp_strength > 0 and t_prev > 0:
+                # CFG-MP: project Euler step result back toward data manifold.
+                # Use conditional-only pred_x_0 (not CFG-boosted) for true manifold target.
+                cond_pred_v = getattr(self, '_last_cond_pred_v', None)
+                if cond_pred_v is not None:
+                    cond_x_0, _ = self._v_to_xstart_eps(sample, t, cond_pred_v)
+                else:
+                    cond_x_0 = out.pred_x_0  # fallback to CFG pred_x_0
+                sigma_t = self.sigma_min + (1 - self.sigma_min) * t
+                sigma_t_prev = self.sigma_min + (1 - self.sigma_min) * t_prev
+                ratio = sigma_t_prev / sigma_t
+                coeff_x0 = (1 - t_prev) - (1 - t) * ratio
+                x_manifold = ratio * sample + coeff_x0 * cond_x_0
+                out.pred_x_prev = out.pred_x_prev + cfg_mp_strength * (x_manifold - out.pred_x_prev)
             sample = out.pred_x_prev
             ret.pred_x_t.append(out.pred_x_prev)
             ret.pred_x_0.append(out.pred_x_0)

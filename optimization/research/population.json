@@ -1,0 +1,573 @@
+{
+  "version": "2.0",
+  "description": "GA population v2: Gen 0 restored from experiment_log",
+  "generation": 3,
+  "population_size": 8,
+  "elite_ratio": 0.25,
+  "mutation_rate": 0.15,
+  "crossover_rate": 0.6,
+  "parameter_bounds": {
+    "tex_slat_guidance_strength": {
+      "min": 3.0,
+      "max": 12.0,
+      "type": "float",
+      "step": 0.5
+    },
+    "tex_slat_guidance_rescale": {
+      "min": 0.5,
+      "max": 1.0,
+      "type": "float",
+      "step": 0.05
+    },
+    "tex_slat_sampling_steps": {
+      "min": 8,
+      "max": 20,
+      "type": "int",
+      "step": 2
+    },
+    "tex_slat_rescale_t": {
+      "min": 1.0,
+      "max": 6.0,
+      "type": "float",
+      "step": 0.5
+    },
+    "shape_slat_guidance_strength": {
+      "min": 5.0,
+      "max": 12.0,
+      "type": "float",
+      "step": 0.5
+    },
+    "shape_slat_guidance_rescale": {
+      "min": 0.3,
+      "max": 0.8,
+      "type": "float",
+      "step": 0.05
+    },
+    "shape_slat_sampling_steps": {
+      "min": 8,
+      "max": 20,
+      "type": "int",
+      "step": 2
+    },
+    "ss_guidance_strength": {
+      "min": 5.0,
+      "max": 12.0,
+      "type": "float",
+      "step": 0.5
+    },
+    "ss_guidance_rescale": {
+      "min": 0.5,
+      "max": 0.9,
+      "type": "float",
+      "step": 0.05
+    }
+  },
+  "fixed_params": {
+    "resolution": "1024",
+    "multiview_mode": "concat",
+    "texture_multiview_mode": "tapa",
+    "remesh_project": 0.9,
+    "ss_rescale_t": 5.0,
+    "shape_slat_rescale_t": 3.0,
+    "cfg_mode": "standard",
+    "guidance_schedule": "binary"
+  },
+  "individuals": [
+    {
+      "id": "v2-high-tex-g",
+      "generation": 3,
+      "origin": "elite_from_gen2",
+      "params": {
+        "tex_slat_guidance_strength": 12.0,
+        "tex_slat_guidance_rescale": 1.0,
+        "tex_slat_sampling_steps": 16,
+        "tex_slat_rescale_t": 4.0,
+        "shape_slat_guidance_strength": 10.0,
+        "shape_slat_guidance_rescale": 0.6,
+        "shape_slat_sampling_steps": 16,
+        "ss_guidance_strength": 10.0,
+        "ss_guidance_rescale": 0.8
+      },
+      "fitness": {
+        "overall": 37.78,
+        "per_example": {
+          "1": {
+            "overall": 34.6,
+            "silhouette": 9.13,
+            "contour": 9.31,
+            "color": 41.52,
+            "detail": 23.95,
+            "artifacts": 91.42,
+            "smoothness": 10.64,
+            "coherence": 74.47
+          },
+          "4": {
+            "overall": 38.98,
+            "silhouette": 16.5,
+            "contour": 48.58,
+            "color": 12.85,
+            "detail": 26.41,
+            "artifacts": 99.62,
+            "smoothness": 16.23,
+            "coherence": 64.45
+          },
+          "7": {
+            "overall": 39.76,
+            "silhouette": 15.79,
+            "contour": 36.41,
+            "color": 44.81,
+            "detail": 22.68,
+            "artifacts": 98.37,
+            "smoothness": 10.18,
+            "coherence": 58.67
+          }
+        },
+        "per_dimension": {
+          "silhouette": 13.81,
+          "contour": 31.43,
+          "color": 33.06,
+          "detail": 24.35,
+          "artifacts": 96.47,
+          "smoothness": 12.35,
+          "coherence": 65.86
+        }
+      },
+      "seed": 42,
+      "status": "evaluated"
+    },
+    {
+      "id": "gen2-004",
+      "generation": 3,
+      "origin": "elite_from_gen2",
+      "params": {
+        "tex_slat_guidance_strength": 10.5,
+        "tex_slat_guidance_rescale": 0.95,
+        "tex_slat_sampling_steps": 16,
+        "tex_slat_rescale_t": 2.5,
+        "shape_slat_guidance_strength": 9.5,
+        "shape_slat_guidance_rescale": 0.55,
+        "shape_slat_sampling_steps": 16,
+        "ss_guidance_strength": 9.0,
+        "ss_guidance_rescale": 0.8
+      },
+      "fitness": {
+        "overall": 37.75,
+        "per_example": {
+          "1": {
+            "overall": 35.27,
+            "silhouette": 9.09,
+            "contour": 9.53,
+            "color": 55.94,
+            "detail": 23.23,
+            "artifacts": 93.94,
+            "smoothness": 6.55,
+            "coherence": 62.34
+          },
+          "4": {
+            "overall": 38.65,
+            "silhouette": 16.93,
+            "contour": 50.67,
+            "color": 12.34,
+            "detail": 25.24,
+            "artifacts": 99.64,
+            "smoothness": 13.31,
+            "coherence": 63.51
+          },
+          "7": {
+            "overall": 39.33,
+            "silhouette": 15.68,
+            "contour": 38.42,
+            "color": 53.5,
+            "detail": 21.32,
+            "artifacts": 93.05,
+            "smoothness": 7.0,
+            "coherence": 52.72
+          }
+        },
+        "per_dimension": {
+          "silhouette": 13.9,
+          "contour": 32.87,
+          "color": 40.59,
+          "detail": 23.26,
+          "artifacts": 95.54,
+          "smoothness": 8.95,
+          "coherence": 59.52
+        }
+      },
+      "seed": 141,
+      "status": "evaluated"
+    },
+    {
+      "id": "gen3-001",
+      "generation": 3,
+      "origin": "mutation(v2-high-rescale)",
+      "params": {
+        "tex_slat_guidance_strength": 7.0,
+        "tex_slat_guidance_rescale": 1.0,
+        "tex_slat_sampling_steps": 12,
+        "tex_slat_rescale_t": 3.0,
+        "shape_slat_guidance_strength": 7.5,
+        "shape_slat_guidance_rescale": 0.7,
+        "shape_slat_sampling_steps": 12,
+        "ss_guidance_strength": 7.5,
+        "ss_guidance_rescale": 0.7
+      },
+      "fitness": {
+        "overall": 37.16,
+        "per_example": {
+          "1": {
+            "overall": 34.0,
+            "silhouette": 9.04,
+            "contour": 9.34,
+            "color": 42.49,
+            "detail": 23.79,
+            "artifacts": 88.72,
+            "smoothness": 10.94,
+            "coherence": 70.84
+          },
+          "4": {
+            "overall": 38.24,
+            "silhouette": 15.63,
+            "contour": 50.35,
+            "color": 16.12,
+            "detail": 25.59,
+            "artifacts": 99.6,
+            "smoothness": 10.34,
+            "coherence": 60.9
+          },
+          "7": {
+            "overall": 39.24,
+            "silhouette": 15.67,
+            "contour": 36.0,
+            "color": 54.46,
+            "detail": 21.7,
+            "artifacts": 93.04,
+            "smoothness": 7.84,
+            "coherence": 52.35
+          }
+        },
+        "per_dimension": {
+          "silhouette": 13.45,
+          "contour": 31.9,
+          "color": 37.69,
+          "detail": 23.7,
+          "artifacts": 93.79,
+          "smoothness": 9.71,
+          "coherence": 61.36
+        }
+      },
+      "seed": 4311,
+      "status": "evaluated"
+    },
+    {
+      "id": "gen3-002",
+      "generation": 3,
+      "origin": "crossover(gen2-004,gen2-001)",
+      "params": {
+        "tex_slat_guidance_strength": 10.5,
+        "tex_slat_guidance_rescale": 1.0,
+        "tex_slat_sampling_steps": 16,
+        "tex_slat_rescale_t": 3.5,
+        "shape_slat_guidance_strength": 9.0,
+        "shape_slat_guidance_rescale": 0.55,
+        "shape_slat_sampling_steps": 16,
+        "ss_guidance_strength": 8.5,
+        "ss_guidance_rescale": 0.8
+      },
+      "fitness": {
+        "overall": 37.55,
+        "per_example": {
+          "1": {
+            "overall": 35.46,
+            "silhouette": 9.24,
+            "contour": 9.76,
+            "color": 52.31,
+            "detail": 23.63,
+            "artifacts": 96.82,
+            "smoothness": 6.52,
+            "coherence": 64.44
+          },
+          "4": {
+            "overall": 36.82,
+            "silhouette": 13.39,
+            "contour": 38.22,
+            "color": 13.36,
+            "detail": 25.92,
+            "artifacts": 99.43,
+            "smoothness": 17.08,
+            "coherence": 63.35
+          },
+          "7": {
+            "overall": 40.37,
+            "silhouette": 15.86,
+            "contour": 37.97,
+            "color": 48.63,
+            "detail": 22.58,
+            "artifacts": 97.99,
+            "smoothness": 9.47,
+            "coherence": 58.27
+          }
+        },
+        "per_dimension": {
+          "silhouette": 12.83,
+          "contour": 28.65,
+          "color": 38.1,
+          "detail": 24.04,
+          "artifacts": 98.08,
+          "smoothness": 11.02,
+          "coherence": 62.02
+        }
+      },
+      "seed": 6073,
+      "status": "evaluated"
+    },
+    {
+      "id": "gen3-003",
+      "generation": 3,
+      "origin": "crossover(v2-high-tex-g,gen2-006)",
+      "params": {
+        "tex_slat_guidance_strength": 12.0,
+        "tex_slat_guidance_rescale": 1.0,
+        "tex_slat_sampling_steps": 16,
+        "tex_slat_rescale_t": 4.0,
+        "shape_slat_guidance_strength": 10.0,
+        "shape_slat_guidance_rescale": 0.6,
+        "shape_slat_sampling_steps": 16,
+        "ss_guidance_strength": 11.5,
+        "ss_guidance_rescale": 0.8
+      },
+      "fitness": {
+        "overall": 37.21,
+        "per_example": {
+          "1": {
+            "overall": 35.68,
+            "silhouette": 9.18,
+            "contour": 9.91,
+            "color": 56.16,
+            "detail": 23.34,
+            "artifacts": 92.28,
+            "smoothness": 7.33,
+            "coherence": 66.58
+          },
+          "4": {
+            "overall": 36.01,
+            "silhouette": 11.96,
+            "contour": 38.46,
+            "color": 14.03,
+            "detail": 24.89,
+            "artifacts": 97.95,
+            "smoothness": 15.62,
+            "coherence": 62.2
+          },
+          "7": {
+            "overall": 39.94,
+            "silhouette": 15.86,
+            "contour": 38.32,
+            "color": 46.67,
+            "detail": 22.01,
+            "artifacts": 98.32,
+            "smoothness": 8.07,
+            "coherence": 58.63
+          }
+        },
+        "per_dimension": {
+          "silhouette": 12.33,
+          "contour": 28.9,
+          "color": 38.95,
+          "detail": 23.41,
+          "artifacts": 96.18,
+          "smoothness": 10.34,
+          "coherence": 62.47
+        }
+      },
+      "seed": 2305,
+      "status": "evaluated"
+    },
+    {
+      "id": "gen3-004",
+      "generation": 3,
+      "origin": "crossover(gen2-006,v2-high-rescale)",
+      "params": {
+        "tex_slat_guidance_strength": 9.5,
+        "tex_slat_guidance_rescale": 1.0,
+        "tex_slat_sampling_steps": 12,
+        "tex_slat_rescale_t": 4.0,
+        "shape_slat_guidance_strength": 7.5,
+        "shape_slat_guidance_rescale": 0.6,
+        "shape_slat_sampling_steps": 12,
+        "ss_guidance_strength": 9.5,
+        "ss_guidance_rescale": 0.8
+      },
+      "fitness": {
+        "overall": 37.18,
+        "per_example": {
+          "1": {
+            "overall": 35.02,
+            "silhouette": 9.19,
+            "contour": 9.63,
+            "color": 44.99,
+            "detail": 23.18,
+            "artifacts": 93.97,
+            "smoothness": 10.52,
+            "coherence": 69.94
+          },
+          "4": {
+            "overall": 35.89,
+            "silhouette": 11.96,
+            "contour": 38.42,
+            "color": 15.7,
+            "detail": 24.01,
+            "artifacts": 99.4,
+            "smoothness": 12.98,
+            "coherence": 61.24
+          },
+          "7": {
+            "overall": 40.64,
+            "silhouette": 15.8,
+            "contour": 35.72,
+            "color": 51.93,
+            "detail": 23.0,
+            "artifacts": 97.62,
+            "smoothness": 10.28,
+            "coherence": 58.49
+          }
+        },
+        "per_dimension": {
+          "silhouette": 12.32,
+          "contour": 27.92,
+          "color": 37.54,
+          "detail": 23.4,
+          "artifacts": 97.0,
+          "smoothness": 11.26,
+          "coherence": 63.23
+        }
+      },
+      "seed": 4,
+      "status": "evaluated"
+    },
+    {
+      "id": "gen3-005",
+      "generation": 3,
+      "origin": "crossover(gen2-006,v2-high-tex-g)",
+      "params": {
+        "tex_slat_guidance_strength": 12.0,
+        "tex_slat_guidance_rescale": 1.0,
+        "tex_slat_sampling_steps": 16,
+        "tex_slat_rescale_t": 4.0,
+        "shape_slat_guidance_strength": 10.0,
+        "shape_slat_guidance_rescale": 0.5,
+        "shape_slat_sampling_steps": 16,
+        "ss_guidance_strength": 10.0,
+        "ss_guidance_rescale": 0.8
+      },
+      "fitness": {
+        "overall": 37.81,
+        "per_example": {
+          "1": {
+            "overall": 36.14,
+            "silhouette": 9.11,
+            "contour": 9.26,
+            "color": 47.14,
+            "detail": 24.2,
+            "artifacts": 98.12,
+            "smoothness": 10.43,
+            "coherence": 71.54
+          },
+          "4": {
+            "overall": 37.51,
+            "silhouette": 12.89,
+            "contour": 41.57,
+            "color": 15.32,
+            "detail": 24.54,
+            "artifacts": 99.43,
+            "smoothness": 19.48,
+            "coherence": 61.08
+          },
+          "7": {
+            "overall": 39.77,
+            "silhouette": 15.68,
+            "contour": 37.51,
+            "color": 46.39,
+            "detail": 21.98,
+            "artifacts": 98.23,
+            "smoothness": 8.96,
+            "coherence": 57.7
+          }
+        },
+        "per_dimension": {
+          "silhouette": 12.56,
+          "contour": 29.45,
+          "color": 36.28,
+          "detail": 23.57,
+          "artifacts": 98.59,
+          "smoothness": 12.96,
+          "coherence": 63.44
+        }
+      },
+      "seed": 7911,
+      "status": "evaluated"
+    },
+    {
+      "id": "gen3-006",
+      "generation": 3,
+      "origin": "mutation(gen2-004)",
+      "params": {
+        "tex_slat_guidance_strength": 10.5,
+        "tex_slat_guidance_rescale": 0.95,
+        "tex_slat_sampling_steps": 16,
+        "tex_slat_rescale_t": 2.5,
+        "shape_slat_guidance_strength": 9.5,
+        "shape_slat_guidance_rescale": 0.65,
+        "shape_slat_sampling_steps": 16,
+        "ss_guidance_strength": 7.5,
+        "ss_guidance_rescale": 0.8
+      },
+      "fitness": {
+        "overall": 37.49,
+        "per_example": {
+          "1": {
+            "overall": 34.14,
+            "silhouette": 9.05,
+            "contour": 9.45,
+            "color": 50.23,
+            "detail": 23.07,
+            "artifacts": 92.5,
+            "smoothness": 7.41,
+            "coherence": 60.88
+          },
+          "4": {
+            "overall": 38.32,
+            "silhouette": 16.51,
+            "contour": 49.58,
+            "color": 14.2,
+            "detail": 26.06,
+            "artifacts": 99.53,
+            "smoothness": 12.04,
+            "coherence": 61.15
+          },
+          "7": {
+            "overall": 40.01,
+            "silhouette": 15.82,
+            "contour": 38.04,
+            "color": 54.26,
+            "detail": 21.45,
+            "artifacts": 95.64,
+            "smoothness": 7.14,
+            "coherence": 54.4
+          }
+        },
+        "per_dimension": {
+          "silhouette": 13.79,
+          "contour": 32.36,
+          "color": 39.56,
+          "detail": 23.53,
+          "artifacts": 95.89,
+          "smoothness": 8.86,
+          "coherence": 58.81
+        }
+      },
+      "seed": 2185,
+      "status": "evaluated"
+    }
+  ]
+}
