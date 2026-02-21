@@ -752,7 +752,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         resolution: int,
         coords: torch.Tensor,
         sampler_params: dict = {},
-        max_num_tokens: int = 49152,
+        max_num_tokens: int = 65536,
     ) -> SparseTensor:
         """
         Sample structured latent with the given conditioning.
@@ -800,7 +800,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             ], dim=1)
             coords = quant_coords.unique(dim=0)
             num_tokens = coords.shape[0]
-            if num_tokens < max_num_tokens or hr_resolution == 1024:
+            if num_tokens < max_num_tokens or hr_resolution <= 1024:
                 if hr_resolution != resolution:
                     print(f"Due to the limited number of tokens, the resolution is reduced to {hr_resolution}.")
                 break
@@ -965,7 +965,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         preprocess_image: bool = True,
         return_latent: bool = False,
         pipeline_type: Optional[str] = None,
-        max_num_tokens: int = 49152,
+        max_num_tokens: int = 65536,
     ) -> List[MeshWithVoxel]:
         """
         Run the pipeline.
@@ -1074,7 +1074,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         preprocess_image: bool = True,
         return_latent: bool = False,
         pipeline_type: Optional[str] = None,
-        max_num_tokens: int = 49152,
+        max_num_tokens: int = 65536,
         multiview_mode: str = 'multidiffusion',
         texture_multiview_mode: Optional[str] = None,
         custom_yaw_angles: Optional[list] = None,

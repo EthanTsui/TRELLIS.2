@@ -94,7 +94,7 @@ class FlowEulerSampler(Sampler):
     ):
         """
         Generate samples from the model using Euler method.
-        
+
         Args:
             model: The model to sample from.
             noise: The initial noise tensor.
@@ -115,6 +115,10 @@ class FlowEulerSampler(Sampler):
         zero_init_steps = kwargs.pop('zero_init_steps', 0)
         # CFG-MP: manifold projection strength (0=off, recommended 0.1-0.3)
         cfg_mp_strength = kwargs.pop('cfg_mp_strength', 0.0)
+        # Heun: use 2nd-order Heun method for the last N steps (0=off)
+        heun_steps = kwargs.pop('heun_steps', 0)
+        # AB2: Adams-Bashforth 2nd order multistep (free accuracy, no extra model calls)
+        multistep = kwargs.pop('multistep', False)
 
         sample = noise
         t_seq = np.linspace(1, 0, steps + 1)
@@ -122,6 +126,8 @@ class FlowEulerSampler(Sampler):
         t_seq = t_seq.tolist()
         t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
         ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
+        prev_v = None  # for AB2 multistep
+        prev_dt = None
         for step_idx, (t, t_prev) in enumerate(tqdm(t_pairs, desc=tqdm_desc, disable=not verbose)):
             if step_idx < zero_init_steps:
                 # CFG-Zero*: hold position for early steps
@@ -129,6 +135,24 @@ class FlowEulerSampler(Sampler):
                 ret.pred_x_0.append(sample)
                 continue
             out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
+            dt = t - t_prev
+            # Heun correction: 2nd-order method for final steps where detail forms
+            use_heun = heun_steps > 0 and step_idx >= steps - heun_steps and t_prev > 0
+            if use_heun:
+                v1 = (sample - out.pred_x_prev) / dt
+                _, _, v2 = self._get_model_prediction(model, out.pred_x_prev, t_prev, cond, **kwargs)
+                out.pred_x_prev = sample - dt / 2 * (v1 + v2)
+            elif multistep and prev_v is not None and prev_dt is not None:
+                # AB2: variable step-size Adams-Bashforth 2nd order
+                v_curr = (sample - out.pred_x_prev) / dt
+                r = dt / (2 * prev_dt)
+                out.pred_x_prev = sample - dt * ((1 + r) * v_curr - r * prev_v)
+                prev_v = v_curr
+                prev_dt = dt
+            elif multistep:
+                # First step: store velocity for AB2
+                prev_v = (sample - out.pred_x_prev) / dt
+                prev_dt = dt
             if cfg_mp_strength > 0 and t_prev > 0:
                 # CFG-MP: project Euler step result back toward data manifold.
                 # Use conditional-only pred_x_0 (not CFG-boosted) for true manifold target.

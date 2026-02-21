@@ -5,6 +5,50 @@ Uses genetic algorithm principles: keep good parameters, replace bad ones, conti
 
 ---
 
+## Survey v3: Quality Evaluation Metrics (2026-02-21)
+
+### Scope
+Comprehensive survey of 3D generation quality evaluation metrics, frameworks, and self-improvement methods from 2024-2026. 40+ references across 7 areas: perceptual metrics, multi-view consistency, geometric quality, texture/PBR evaluation, automated evaluation pipelines, human preference alignment, and reward-guided self-improvement.
+
+### Key Findings
+
+1. **Hi3DEval (NeurIPS 2025) is the new SOTA automated evaluator**
+   - Hierarchical: object-level (5 dims), part-level (2 dims), material-subject (4 dims)
+   - Uses InternVideo2.5 encoder + PartField 3D features
+   - Kendall tau 0.774 vs GPTEval3D 0.690 on geometry plausibility
+   - Multi-agent annotation pipeline (M2AP) achieves L1 0.257 vs single GPT-4.1 L1 0.702
+
+2. **DreamSim supersedes LPIPS** (tau 0.77 vs 0.58)
+   - NVS benchmarking (2025) confirms DreamSim degrades gracefully with corruption while LPIPS/SSIM cliff-edge
+   - Drop-in replacement: `pip install dreamsim`, ~10 LOC
+
+3. **Our evaluator's estimated human correlation is tau ~0.3-0.5** (significantly below SOTA)
+   - Hand-crafted heuristics vs learned features
+   - Missing input alignment entirely (CLIP-S/VQAScore)
+   - Missing multi-view consistency (MEt3R)
+
+4. **Self-improvement via quality metrics is real**
+   - DreamDPO: +24-48 pts on GPTEval3D via DPO with HPSv2 reward
+   - DSO (ICCV 2025): DRO converges faster than DPO for 3D generator alignment
+   - VLM3D: Qwen2.5-VL as differentiable reward outperforms CLIP-based SDS
+
+5. **Production systems use multi-metric dashboards + human QA**
+   - No fully automated scoring disclosed by Meshy/Tripo/Rodin
+   - 3D Arena: 123K votes confirm automated metrics weakly correlate with preference
+
+### Priority Evaluator Upgrades
+1. Add CLIP-S (2 hrs) -- most universally reported metric, 5ms compute
+2. Replace LPIPS with DreamSim (1 hr) -- 2x better human alignment
+3. Add LAION Aesthetic (1 hr) -- cheap aesthetic proxy
+4. Add PBR plausibility checks (2 hrs) -- metallic/roughness/albedo histogram checks
+5. Add VQAScore or VLM scoring (1 day) -- compositional understanding
+6. Add MEt3R consistency (2 days) -- multi-view coherence
+
+### File
+`TRELLIS.2/optimization/research/survey_quality_metrics_2026_02.md`
+
+---
+
 ## V3.2 Final Evaluation Results (2026-02-19 Evening)
 
 ### V3.2 Comparison Table (3 test images × 4 configs)

@@ -433,6 +433,8 @@ def image_to_3d(
     tex_slat_sampling_steps: int,
     tex_slat_rescale_t: float,
     tex_slat_cfg_mp_strength: float,
+    tex_slat_heun_steps: int,
+    multistep: bool,
     back_image: Optional[Image.Image],
     left_image: Optional[Image.Image],
     right_image: Optional[Image.Image],
@@ -474,12 +476,14 @@ def image_to_3d(
             "guidance_strength": ss_guidance_strength,
             "guidance_rescale": ss_guidance_rescale,
             "rescale_t": ss_rescale_t,
+            "multistep": multistep,
         },
         shape_slat_sampler_params={
             "steps": shape_slat_sampling_steps,
             "guidance_strength": shape_slat_guidance_strength,
             "guidance_rescale": shape_slat_guidance_rescale,
             "rescale_t": shape_slat_rescale_t,
+            "multistep": multistep,
         },
         tex_slat_sampler_params={
             "steps": tex_slat_sampling_steps,
@@ -487,6 +491,8 @@ def image_to_3d(
             "guidance_rescale": tex_slat_guidance_rescale,
             "rescale_t": tex_slat_rescale_t,
             "cfg_mp_strength": tex_slat_cfg_mp_strength,
+            "heun_steps": tex_slat_heun_steps,
+            "multistep": multistep,
         },
         pipeline_type={
             "512": "512",
@@ -653,10 +659,10 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         with gr.Column(scale=1, min_width=360):
             image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
             
-            resolution = gr.Radio(["512", "1024", "1536"], label="Resolution", value="1024")
+            resolution = gr.Radio(["512", "1024", "1536"], label="Resolution", value="1536")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
             randomize_seed = gr.Checkbox(label="Randomize Seed", value=True)
-            decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)
+            decimation_target = gr.Slider(100000, 2000000, label="Decimation Target", value=800000, step=10000)
             texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
 
             multiview_layout = gr.Dropdown(
@@ -719,6 +725,8 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                     tex_slat_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=16, step=1)
                     tex_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=4.0, step=0.1)
                     tex_slat_cfg_mp_strength = gr.Slider(0.0, 0.5, label="CFG-MP Strength", value=0.15, step=0.01)
+                    tex_slat_heun_steps = gr.Slider(0, 8, label="Heun Steps (final)", value=4, step=1)
+                multistep = gr.Checkbox(label="AB2 Multistep (free 2nd-order accuracy)", value=True)
 
         with gr.Column(scale=10):
             with gr.Walkthrough(selected=0) as walkthrough:
@@ -764,7 +772,8 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             image_prompt, seed, resolution,
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
-            tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t, tex_slat_cfg_mp_strength,
+            tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t, tex_slat_cfg_mp_strength, tex_slat_heun_steps,
+            multistep,
             back_image, left_image, right_image, top_image, bottom_image,
             multiview_layout, multiview_mode, texture_multiview_mode, custom_angles,
         ],
