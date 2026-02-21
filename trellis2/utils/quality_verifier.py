@@ -62,16 +62,20 @@ class QualityVerifier:
             Dict mapping render key (e.g. 'base_color') to list of [H,W,3] uint8 arrays.
         """
         from .render_utils import yaw_pitch_r_fov_to_extrinsics_intrinsics, render_frames
+        from ..renderers import EnvMap
 
         yaws = [i * 2 * np.pi / num_views for i in range(num_views)]
         pitchs = [0.25] * num_views  # slightly elevated
         extrinsics, intrinsics = yaw_pitch_r_fov_to_extrinsics_intrinsics(
-            yaws, pitchs, r=2, fov=40
+            yaws, pitchs, 2, 40
         )
+        # PbrMeshRenderer.render() requires an envmap; use a plain white one
+        envmap = EnvMap(torch.ones(16, 32, 3, device=self.device))
         return render_frames(
             mesh, extrinsics, intrinsics,
             {'resolution': resolution},
-            verbose=False
+            verbose=False,
+            envmap=envmap,
         )
 
     def _image_to_lpips_tensor(self, img, size: int = 224) -> torch.Tensor:
