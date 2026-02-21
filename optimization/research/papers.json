@@ -1,6 +1,6 @@
 {
-  "version": "2.0",
-  "description": "Surveyed papers with relevance to TRELLIS.2 quality improvement. Updated 2026-02-19 with comprehensive generation-improvement survey.",
+  "version": "3.0",
+  "description": "Surveyed papers with relevance to TRELLIS.2 quality improvement. Updated 2026-02-22 with mesh integrity, texture quality, and commercial standards survey.",
   "papers": [
     {
       "id": "trellis2-2025",
@@ -589,6 +589,126 @@
       "relevance_score": 5,
       "tags": ["architecture", "triplane", "DiT"],
       "date_surveyed": "2026-02-19"
+    },
+    {
+      "id": "pcd-crack-detection-2024",
+      "title": "Perceptual Crack Detection for Rendered 3D Textured Meshes",
+      "authors": ["Shafiei et al."],
+      "venue": "IEEE QoMEX 2024",
+      "arxiv": "https://arxiv.org/abs/2405.06143",
+      "key_contribution": "Contrast and Laplacian-based crack artifact detection in rendered meshes; generates crack maps for quality assessment weighting",
+      "relevance_to_trellis2": "Directly addresses surface peeling/fragmentation detection -- one of our 5 critical undetected defects",
+      "relevance_score": 8,
+      "tags": ["evaluation", "crack-detection", "texture-quality", "artifacts"],
+      "date_surveyed": "2026-02-22"
+    },
+    {
+      "id": "robust-hole-detection-2024",
+      "title": "Robust Hole-Detection in Triangular Meshes Irrespective of the Presence of Singular Vertices",
+      "authors": ["Unknown"],
+      "venue": "ScienceDirect 2024",
+      "arxiv": "https://arxiv.org/abs/2311.12466",
+      "key_contribution": "Boundary traversal for hole detection handling singular vertices; robust boundary loop counting",
+      "relevance_to_trellis2": "Provides robust hole detection for TRELLIS.2 meshes, replacing simple watertight binary check",
+      "relevance_score": 7,
+      "tags": ["evaluation", "mesh-integrity", "hole-detection", "geometry"],
+      "date_surveyed": "2026-02-22"
+    },
+    {
+      "id": "hybridmqa-2024",
+      "title": "HybridMQA: Exploring Geometry-Texture Interactions for Colored Mesh Quality Assessment",
+      "authors": ["Unknown"],
+      "venue": "arXiv 2024",
+      "arxiv": "https://arxiv.org/abs/2412.01986",
+      "key_contribution": "Graph learning + 2D projection with cross-attention for joint geometry-texture quality; first hybrid full-reference colored mesh QA",
+      "relevance_to_trellis2": "Shows that joint geometry-texture analysis outperforms individual analysis; relevant for detecting peeling where texture diverges from geometry",
+      "relevance_score": 6,
+      "tags": ["evaluation", "geometry-texture", "cross-attention", "quality-metrics"],
+      "date_surveyed": "2026-02-22"
+    },
+    {
+      "id": "seamcrafter-2025",
+      "title": "SeamCrafter: Enhancing Mesh Seam Generation for Artist UV Unwrapping via Reinforcement Learning",
+      "authors": ["Li et al."],
+      "venue": "arXiv 2025",
+      "arxiv": "https://arxiv.org/abs/2509.20725",
+      "key_contribution": "RL-based UV seam placement with seam-evaluation framework assessing distortion and fragmentation; DPO for seam quality",
+      "relevance_to_trellis2": "Seam evaluation framework applicable to measuring UV seam quality in TRELLIS.2 outputs; xatlas replacement candidate",
+      "relevance_score": 6,
+      "tags": ["UV", "seam-quality", "RL", "evaluation"],
+      "date_surveyed": "2026-02-22"
+    },
+    {
+      "id": "artuv-2025-v2",
+      "title": "ArtUV: Unsupervised Representation Learning for 3D Mesh Parameterization with Semantic and Visibility Objectives",
+      "authors": ["Unknown"],
+      "venue": "arXiv 2025",
+      "arxiv": "https://arxiv.org/abs/2509.25094",
+      "key_contribution": "Visibility-aware UV unwrapping using ambient occlusion as exposure proxy; steers seams toward occluded regions",
+      "relevance_to_trellis2": "Visibility-aware UV would reduce seam visibility on TRELLIS.2 outputs; differentiable AO objective",
+      "relevance_score": 6,
+      "tags": ["UV", "visibility", "seam-placement", "occlusion"],
+      "date_surveyed": "2026-02-22"
+    },
+    {
+      "id": "fmqm-2025",
+      "title": "Textured Mesh Quality Assessment Using Geometry and Color Field Similarity",
+      "authors": ["Unknown"],
+      "venue": "arXiv 2025",
+      "arxiv": "https://arxiv.org/abs/2505.10824",
+      "key_contribution": "SDF + color field based quality metric with 4 perception features: geometry similarity, geometry gradient, color distribution, color gradient",
+      "relevance_to_trellis2": "Principled approach to textured mesh quality; the color field similarity could detect bleeding and desaturation",
+      "relevance_score": 5,
+      "tags": ["evaluation", "SDF", "color-field", "quality-metrics"],
+      "date_surveyed": "2026-02-22"
+    },
+    {
+      "id": "geodesicpsim-2025",
+      "title": "GeodesicPSIM: Predicting the Quality of Static Mesh with Texture Map via Geodesic Patch Similarity",
+      "authors": ["Unknown"],
+      "venue": "arXiv 2023/2025",
+      "arxiv": "https://arxiv.org/abs/2308.04928",
+      "key_contribution": "Geodesic distance-based patch extraction for mesh+texture quality; more accurate than Euclidean for curved surfaces",
+      "relevance_to_trellis2": "Novel mesh-native quality measurement that respects surface topology",
+      "relevance_score": 5,
+      "tags": ["evaluation", "geodesic", "patch-similarity", "textured-mesh"],
+      "date_surveyed": "2026-02-22"
+    },
+    {
+      "id": "lavoue-roughness-2007",
+      "title": "A Roughness Measure for 3D Mesh Visual Masking",
+      "authors": ["Guillaume Lavoue"],
+      "venue": "APGV 2007",
+      "arxiv": null,
+      "key_contribution": "Gaussian curvature-based local roughness LRGC for mesh visual quality masking; surface-integral weighted roughness metric",
+      "relevance_to_trellis2": "Directly applicable to measuring surface roughness on TRELLIS.2 outputs; detects the 'orange peel' effect on smooth manufactured objects",
+      "relevance_score": 7,
+      "tags": ["evaluation", "roughness", "curvature", "geometry"],
+      "date_surveyed": "2026-02-22"
+    },
+    {
+      "id": "fmpd-roughness-2012",
+      "title": "A fast roughness-based approach to the assessment of 3D mesh visual quality",
+      "authors": ["Lavoue et al."],
+      "venue": "Computers & Graphics 2012",
+      "arxiv": null,
+      "key_contribution": "Fast Mesh Perceptual Distance using global roughness values from dihedral angles and geometric Laplacian variance; multi-scale roughness comparison",
+      "relevance_to_trellis2": "Efficient roughness computation using dihedral angles -- directly available from trimesh face_adjacency_angles",
+      "relevance_score": 6,
+      "tags": ["evaluation", "roughness", "perceptual-distance", "fast"],
+      "date_surveyed": "2026-02-22"
+    },
+    {
+      "id": "hi3deval-2025",
+      "title": "Advancing 3D Generation Evaluation with Hierarchical Validity",
+      "authors": ["Zhang et al."],
+      "venue": "NeurIPS 2025",
+      "arxiv": "https://arxiv.org/abs/2508.05609",
+      "key_contribution": "Hierarchical 3D evaluation: object(5d), part(2d), material(4d); InternVideo2.5 + PartField; M2AP annotation pipeline; tau=0.774",
+      "relevance_to_trellis2": "Current SOTA automated evaluator; material-level dimensions (details, colorfulness, consistency, plausibility) directly relevant to our defects",
+      "relevance_score": 8,
+      "tags": ["evaluation", "hierarchical", "learned-metric", "SOTA"],
+      "date_surveyed": "2026-02-22"
     }
   ]
 }

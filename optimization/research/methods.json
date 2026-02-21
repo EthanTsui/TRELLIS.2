@@ -1,6 +1,6 @@
 {
-  "version": "2.0",
-  "description": "Discovered techniques and approaches for quality improvement. Updated 2026-02-19 with comprehensive literature survey.",
+  "version": "3.0",
+  "description": "Discovered techniques and approaches for quality improvement. Updated 2026-02-22 with mesh integrity and texture quality evaluation methods.",
   "methods": [
     {
       "id": "cfg-rescale-interaction",
@@ -415,6 +415,142 @@
         "reference_section": "improvement_methods.md Section 4.1"
       },
       "date_discovered": "2026-02-19"
+    },
+    {
+      "id": "boundary-edge-hole-detection",
+      "name": "Boundary Edge Hole Detection and Sizing",
+      "category": "evaluation",
+      "description": "Replace binary watertight check with quantified hole analysis: boundary edge counting, loop detection, area estimation. Uses trimesh edge analysis + scipy connected components.",
+      "source": "Robust Hole-Detection (ScienceDirect 2024) + trimesh API",
+      "status": "proposed",
+      "impact": "high",
+      "implementation_effort": "easy",
+      "details": {
+        "metrics": ["n_boundary_edges", "boundary_edge_ratio", "n_boundary_loops", "total_boundary_length", "boundary_length_ratio"],
+        "dependencies": "trimesh (already available), scipy",
+        "compute_cost": "<100ms",
+        "defect_addressed": "mesh holes"
+      },
+      "date_discovered": "2026-02-22"
+    },
+    {
+      "id": "uv-fragmentation-analysis",
+      "name": "UV Island Fragmentation Analysis",
+      "category": "evaluation",
+      "description": "Measure texture map fragmentation via connected component analysis: island count, small island ratio, area CV, fragmentation index. Detects texture peeling/flaking from excessive UV island fragmentation.",
+      "source": "Survey of commercial 3D quality standards + SeamCrafter evaluation framework",
+      "status": "proposed",
+      "impact": "high",
+      "implementation_effort": "easy",
+      "details": {
+        "metrics": ["n_uv_islands", "fragmentation_index", "small_island_ratio", "island_area_cv"],
+        "dependencies": "cv2 (already available)",
+        "compute_cost": "<50ms",
+        "defect_addressed": "surface peeling/fragmentation"
+      },
+      "date_discovered": "2026-02-22"
+    },
+    {
+      "id": "dihedral-roughness-metrics",
+      "name": "Dihedral Angle Roughness Metrics",
+      "category": "evaluation",
+      "description": "Measure surface roughness via dihedral angle statistics: mean, std, rough face ratio. Based on Lavoue (2007) and FMPD (2012) roughness approaches. Available directly from trimesh face_adjacency_angles.",
+      "source": "Lavoue APGV 2007, FMPD CG 2012, trimesh API",
+      "status": "proposed",
+      "impact": "medium-high",
+      "implementation_effort": "easy",
+      "details": {
+        "metrics": ["mean_dihedral_angle", "dihedral_std", "rough_face_ratio", "mean_normal_consistency"],
+        "dependencies": "trimesh (already available)",
+        "compute_cost": "<200ms",
+        "defect_addressed": "surface roughness on manufactured objects"
+      },
+      "date_discovered": "2026-02-22"
+    },
+    {
+      "id": "uv-seam-bleeding-detection",
+      "name": "UV Seam Bleeding Detection",
+      "category": "evaluation",
+      "description": "Detect texture bleeding at UV island boundaries by comparing gradient magnitude at boundaries vs interior. High ratio indicates bleeding. Uses Sobel gradients on texture map.",
+      "source": "Sloyd texture quality metrics, UV mapping best practices",
+      "status": "proposed",
+      "impact": "medium-high",
+      "implementation_effort": "easy",
+      "details": {
+        "metrics": ["seam_gradient_ratio", "boundary_color_discontinuity"],
+        "dependencies": "cv2 (already available)",
+        "compute_cost": "<100ms",
+        "defect_addressed": "texture bleeding across UV seams"
+      },
+      "date_discovered": "2026-02-22"
+    },
+    {
+      "id": "spatial-grey-cluster-detection",
+      "name": "Spatial Grey Cluster Detection",
+      "category": "evaluation",
+      "description": "Upgrade grey detection from global ratio to spatial cluster analysis. Uses connected components on grey pixels (sat<15, val 40-200) to find patches. Largest patch ratio is more perceptually damaging than scattered grey.",
+      "source": "Empirical observation of TRELLIS.2 failure modes + Hi3DEval colorfulness dimension",
+      "status": "proposed",
+      "impact": "medium",
+      "implementation_effort": "easy",
+      "details": {
+        "metrics": ["n_grey_patches", "grey_ratio", "largest_grey_patch_ratio", "chroma_floor_ratio"],
+        "dependencies": "cv2 (already available)",
+        "compute_cost": "<50ms/view",
+        "defect_addressed": "grey/desaturated patches"
+      },
+      "date_discovered": "2026-02-22"
+    },
+    {
+      "id": "pcd-crack-detection",
+      "name": "Perceptual Crack Detection (PCD)",
+      "category": "evaluation",
+      "description": "Specialized crack artifact detection using contrast and Laplacian measurement modules. Generates crack maps for quality assessment weighting. GitHub code available.",
+      "source": "Shafiei et al., QoMEX 2024, arXiv 2405.06143",
+      "status": "proposed",
+      "impact": "medium",
+      "implementation_effort": "medium",
+      "details": {
+        "code_url": "https://github.com/arshafiee/crack-detection-VVM",
+        "compute_cost": "<200ms/view",
+        "defect_addressed": "surface peeling/fragmentation",
+        "caveat": "Full-reference method; crack detection module can be used standalone"
+      },
+      "date_discovered": "2026-02-22"
+    },
+    {
+      "id": "connected-component-quality",
+      "name": "Connected Component Size Analysis",
+      "category": "evaluation",
+      "description": "Extend connected component count with size distribution analysis. Main component should contain >95% faces. Small components (<100 faces) are floating artifacts.",
+      "source": "Game industry mesh quality standards",
+      "status": "proposed",
+      "impact": "medium",
+      "implementation_effort": "easy",
+      "details": {
+        "metrics": ["main_component_ratio", "n_small_fragments", "fragment_face_count"],
+        "dependencies": "scipy (already available)",
+        "compute_cost": "<100ms",
+        "defect_addressed": "floating geometry fragments"
+      },
+      "date_discovered": "2026-02-22"
+    },
+    {
+      "id": "texel-density-uniformity",
+      "name": "Texel Density Uniformity",
+      "category": "evaluation",
+      "description": "Measure the coefficient of variation of texels-per-world-unit across the mesh. High variance means some areas are under-textured while others are over-textured. Standard game industry quality metric.",
+      "source": "Game industry standards, Sloyd texture quality metrics",
+      "status": "proposed",
+      "impact": "medium",
+      "implementation_effort": "medium",
+      "details": {
+        "metrics": ["texel_density_cv", "uv_utilization"],
+        "dependencies": "trimesh UV data",
+        "compute_cost": "<200ms",
+        "threshold": "CV < 0.5 good, 0.5-1.0 acceptable, >1.0 poor"
+      },
+      "date_discovered": "2026-02-22"
     }
   ]
 }

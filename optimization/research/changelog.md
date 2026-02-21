@@ -5,6 +5,135 @@ Uses genetic algorithm principles: keep good parameters, replace bad ones, conti
 
 ---
 
+## Survey v5: Commercial-Grade Mesh Quality Evaluation for 5 Specific Defects (2026-02-22)
+
+### Scope
+Targeted survey for detecting 5 specific defects in TRELLIS.2 outputs that our evaluation system currently FAILS to catch: mesh holes, surface peeling/fragmentation, surface roughness on manufactured objects, texture bleeding across UV seams, and grey/desaturated patches. Covers mesh integrity metrics, surface smoothness methods, texture quality analysis, commercial 3D quality standards (TurboSquid CheckMate, game industry), and 10+ new papers.
+
+### Key Findings
+
+1. **Most impactful improvements require ZERO new model downloads**
+   - Boundary edge counting, UV fragmentation analysis, dihedral roughness, seam bleeding detection, and spatial grey cluster analysis all use trimesh (already installed) and OpenCV (already installed)
+   - Estimated implementation time for all 5: 2-4 hours
+
+2. **Hole detection should use boundary edge analysis, not binary watertight check**
+   - Count boundary loops (connected boundary edge chains) to get hole count
+   - Measure total boundary length / mesh area for severity
+   - Multi-view silhouette flood-fill catches holes visible from each camera angle
+
+3. **Surface peeling is UV fragmentation, not texture noise**
+   - Root cause: xatlas creates too many small UV islands
+   - Detection: connected component analysis on texture mask reveals island count, size distribution
+   - Fragmentation index = n_islands / sqrt(total_texels)
+   - Real TRELLIS.2 data: body_count=5631, confirming fragmentation is severe
+
+4. **Surface roughness best measured by dihedral angle distribution**
+   - trimesh.face_adjacency_angles provides dihedral angles for all adjacent face pairs
+   - Smooth manufactured objects: std(dihedral_angles) < 15 degrees
+   - Lavoue (2007) Gaussian curvature roughness: theoretically grounded, available via trimesh vertex_defects
+   - Current v4 normal-map Laplacian is view-dependent and misses backside roughness
+
+5. **Texture bleeding detectable via boundary gradient ratio**
+   - Compare Sobel gradient magnitude at UV island boundaries vs interior
+   - Ratio > 3.0 indicates bleeding; > 5.0 is severe
+   - Industry standard: 0.5-1 pixel margin minimum to prevent bleeding
+
+6. **Grey patches need spatial clustering, not just global ratio**
+   - Current v4 only counts grey pixels globally (grey_ratio)
+   - A single large grey patch is worse than scattered individual grey pixels
+   - Connected component analysis on grey pixels gives patch count + largest patch area
+
+7. **TurboSquid CheckMate Pro v2 defines industry topology standards**
+   - Grid edge flow, clean subdivision, no unnecessary geometry
+   - AI-generated meshes (including TRELLIS.2) fundamentally fail topology requirements
+   - UV and texture quality standards ARE achievable and measurable
+
+8. **PCD crack detection (QoMEX 2024) directly addresses peeling**
+   - Contrast + Laplacian modules characterize crack artifacts
+   - Code available: github.com/arshafiee/crack-detection-VVM
+   - Full-reference but crack detection module usable standalone
+
+### New Papers Added (10)
+- PCD: Perceptual Crack Detection (QoMEX 2024) -- relevance 8
+- Robust Hole Detection (ScienceDirect 2024) -- relevance 7
+- HybridMQA: Geometry-Texture QA (arXiv 2024) -- relevance 6
+- SeamCrafter: RL UV Seams (arXiv 2025) -- relevance 6
+- ArtUV: Visibility-Aware UV (arXiv 2025) -- relevance 6
+- FMQM: SDF+Color Field QA (arXiv 2025) -- relevance 5
+- GeodesicPSIM: Geodesic Patch Similarity (arXiv 2025) -- relevance 5
+- Lavoue Roughness (APGV 2007) -- relevance 7
+- FMPD: Fast Mesh Perceptual Distance (CG 2012) -- relevance 6
+- Hi3DEval (NeurIPS 2025) -- relevance 8
+
+### New Methods Added (8)
+- boundary-edge-hole-detection (easy, high impact)
+- uv-fragmentation-analysis (easy, high impact)
+- dihedral-roughness-metrics (easy, medium-high impact)
+- uv-seam-bleeding-detection (easy, medium-high impact)
+- spatial-grey-cluster-detection (easy, medium impact)
+- pcd-crack-detection (medium effort, medium impact)
+- connected-component-quality (easy, medium impact)
+- texel-density-uniformity (medium effort, medium impact)
+
+### Files
+- Survey: `TRELLIS.2/optimization/research/survey_mesh_quality_commercial_2026_02.md`
+- Papers database updated: v2.0 -> v3.0 (10 new papers, 44 total)
+- Methods database updated: v2.0 -> v3.0 (8 new methods, 35 total)
+
+---
+
+## Survey v4: Practical Mesh Quality Tools & Implementation Guide (2026-02-22)
+
+### Scope
+Code-level survey of mesh defect detection and quality scoring systems. Covers 6 libraries (trimesh, Open3D, PyVista, PyMeshLab, PyTorch3D, pyiqa), 3 VLM-based evaluation frameworks (GPTEval3D, Hi3DEval, Q-Align), texture/PBR analysis, and industry quality standards.
+
+### Key Findings
+
+1. **trimesh (already installed) provides 80% of mesh quality metrics we need**
+   - Topology: is_watertight, is_winding_consistent, euler_number, body_count
+   - Face quality: face_angles, area_faces, degenerate detection
+   - Edge quality: edges_unique_length, edge length ratio
+   - Normal consistency: face_adjacency + face_normals (manual computation)
+   - Component analysis: split() for fragmentation detection
+
+2. **Real TRELLIS.2 GLB analysis results (e6_round0_baseline.glb)**
+   - NOT watertight (body_count=5631 -- expected for generated meshes)
+   - 44 degenerate faces / 490K total (0.01% -- acceptable)
+   - 17,937 non-smooth face pairs (2.69% -- moderate, actionable signal)
+   - Edge length ratio 120:1 (non-uniform tessellation)
+   - Texture: 2048x2048, 98.4% utilization, 1.76% grey texels
+
+3. **pyiqa provides 30+ no-reference image quality metrics via unified API**
+   - `pip install pyiqa` then `pyiqa.create_metric('musiq')`
+   - Best for our use: MUSIQ, TOPIQ-NR, CLIPIQA+, NIMA
+   - All run on GPU, 5-20ms per image
+
+4. **DreamSim (already installed) supersedes LPIPS**
+   - Drop-in replacement: `from dreamsim import dreamsim`
+   - 96.2% human agreement vs LPIPS 80.2%
+
+5. **Open3D adds self-intersection detection (not in trimesh)**
+   - `mesh.is_self_intersecting()` and `mesh.get_self_intersecting_triangles()`
+   - Requires `pip install open3d`
+
+6. **Industry game-ready standards provide concrete thresholds**
+   - Min angle > 5 deg, max angle < 150 deg
+   - No non-manifold edges, consistent normals
+   - Textures >= 2048x2048 for hero assets
+   - Metallic should be 0 or 1 (not intermediate)
+
+### Recommended 5-Phase Evaluation Pipeline
+1. Mesh Integrity (trimesh, binary checks) -- 0 days to implement
+2. Geometry Quality (trimesh, continuous scores) -- 0 days
+3. Texture Quality (trimesh + numpy + cv2) -- 0 days
+4. Rendered View Quality (pyiqa + DreamSim) -- 1 day
+5. Input Alignment (open_clip + existing evaluator) -- 1 day
+
+### File
+`TRELLIS.2/optimization/research/mesh_quality_tools_survey_2026_02.md`
+
+---
+
 ## Survey v3: Quality Evaluation Metrics (2026-02-21)
 
 ### Scope
