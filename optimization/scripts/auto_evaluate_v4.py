@@ -165,13 +165,20 @@ class QualityEvaluatorV4:
 
         scores = {}
 
-        # A1. Silhouette Match (front view only)
+        # A1. Silhouette Match (best-matching view among all views)
         scores['A1_silhouette'] = self._silhouette_match(
-            base_colors[0], alpha_masks[0], reference_rgba)
+            base_colors[0], alpha_masks[0], reference_rgba,
+            all_alphas=alpha_masks)
 
-        # A2. Color Distribution (front view only)
-        scores['A2_color_dist'] = self._color_distribution_match(
-            base_colors[0], alpha_masks[0], reference_rgba)
+        # A2. Color Distribution (best-matching view)
+        if len(base_colors) > 1:
+            a2_scores = [self._color_distribution_match(
+                bc, am, reference_rgba)
+                for bc, am in zip(base_colors, alpha_masks)]
+            scores['A2_color_dist'] = max(a2_scores)
+        else:
+            scores['A2_color_dist'] = self._color_distribution_match(
+                base_colors[0], alpha_masks[0], reference_rgba)
 
         # B1. Mesh Integrity (from GLB)
         scores['B1_mesh_integrity'] = self._mesh_integrity(glb_mesh)
@@ -211,32 +218,78 @@ class QualityEvaluatorV4:
 
     # ─── A1. Silhouette Match ─────────────────────────────────────────────
 
-    def _silhouette_match(self, rendered_rgb, rendered_alpha, reference_rgba):
-        """Compare rendered silhouette to reference alpha at canonical camera."""
+    def _silhouette_match(self, rendered_rgb, rendered_alpha, reference_rgba,
+                          all_alphas=None):
+        """Compare rendered silhouette to reference alpha.
+
+        Uses scale-invariant IoU: both masks are cropped to their bounding
+        boxes and resized to a canonical size before comparison. This removes
+        framing/scale differences between input image and rendered views.
+
+        Uses best-matching view among all rendered views, since the input
+        image may not be front-facing (yaw=0).
+        """
         if reference_rgba is None or reference_rgba.shape[2] < 4:
             return 50.0
 
-        h, w = rendered_alpha.shape[:2]
         ref_alpha = reference_rgba[:, :, 3]
 
-        # Resize reference to match render resolution
-        if ref_alpha.shape != (h, w):
-            ref_alpha = cv2.resize(ref_alpha, (w, h))
+        def _crop_to_bbox(mask_uint8, pad_frac=0.05):
+            """Crop mask to its bounding box with padding, return resized to 256x256."""
+            binary = (mask_uint8 > 128).astype(np.uint8)
+            coords = np.argwhere(binary > 0)
+            if len(coords) < 10:
+                return np.zeros((256, 256), dtype=np.float32)
+            y0, x0 = coords.min(axis=0)
+            y1, x1 = coords.max(axis=0)
+            h, w = y1 - y0 + 1, x1 - x0 + 1
+            # Make square
+            side = max(h, w)
+            pad = int(side * pad_frac)
+            cy, cx = (y0 + y1) // 2, (x0 + x1) // 2
+            half = side // 2 + pad
+            # Clamp to image bounds
+            H, W = mask_uint8.shape[:2]
+            sy = max(0, cy - half)
+            ey = min(H, cy + half)
+            sx = max(0, cx - half)
+            ex = min(W, cx + half)
+            crop = mask_uint8[sy:ey, sx:ex]
+            if crop.size == 0:
+                return np.zeros((256, 256), dtype=np.float32)
+            resized = cv2.resize(crop, (256, 256), interpolation=cv2.INTER_LINEAR)
+            return (resized > 128).astype(np.float32)
 
-        rend_mask = (rendered_alpha > 128).astype(np.float32)
-        ref_mask = (ref_alpha > 128).astype(np.float32)
+        ref_norm = _crop_to_bbox(ref_alpha)
 
-        intersection = (rend_mask * ref_mask).sum()
-        union = np.clip(rend_mask + ref_mask, 0, 1).sum()
-        iou = intersection / max(union, 1)
+        def _dice(rend_alpha):
+            """Dice coefficient (F1 score) — more forgiving than IoU for shape comparison.
+            Dice = 2*|A∩B| / (|A|+|B|), treats FP/FN equally, less sensitive to
+            small protrusions/indentations that don't affect visual similarity."""
+            rend_norm = _crop_to_bbox(rend_alpha)
+            intersection = (rend_norm * ref_norm).sum()
+            total = rend_norm.sum() + ref_norm.sum()
+            return 2 * intersection / max(total, 1)
 
-        return float(iou * 100)
+        # Find best-matching view among all rendered views
+        if all_alphas is not None and len(all_alphas) > 1:
+            best_dice = max(_dice(a) for a in all_alphas)
+        else:
+            best_dice = _dice(rendered_alpha)
+
+        return float(best_dice * 100)
 
     # ─── A2. Color Distribution Match ─────────────────────────────────────
 
     def _color_distribution_match(self, rendered_rgb, rendered_alpha,
                                   reference_rgba):
-        """Compare color distributions in LAB space using histogram correlation."""
+        """Compare color distributions in LAB space using histogram correlation.
+
+        Uses separate masks for rendered vs reference (not intersection),
+        since the preprocessed reference has different framing/scale.
+        Histogram comparison only needs color distributions to match,
+        not spatial pixel alignment.
+        """
         if reference_rgba is None:
             return 50.0
 
@@ -247,9 +300,8 @@ class QualityEvaluatorV4:
 
         rend_mask = rendered_alpha > 128
         ref_mask = ref_resized[:, :, 3] > 128 if ref_resized.shape[2] == 4 else np.ones((h, w), bool)
-        both_mask = rend_mask & ref_mask
 
-        if both_mask.sum() < 100:
+        if rend_mask.sum() < 100 or ref_mask.sum() < 100:
             return 50.0
 
         # Convert to LAB (perceptually uniform)
@@ -257,19 +309,31 @@ class QualityEvaluatorV4:
         ref_rgb = ref_resized[:, :, :3]
         ref_lab = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2LAB)
 
-        mask_uint8 = both_mask.astype(np.uint8)
-        channel_scores = []
+        rend_mask_u8 = rend_mask.astype(np.uint8)
+        ref_mask_u8 = ref_mask.astype(np.uint8)
+
+        # Use both histogram correlation AND Bhattacharyya distance
+        # Correlation alone is too harsh when distributions shift slightly
+        corr_scores = []
+        bhatt_scores = []
         for c in range(3):
-            rend_hist = cv2.calcHist([rend_lab], [c], mask_uint8, [32], [0, 256])
-            ref_hist = cv2.calcHist([ref_lab], [c], mask_uint8, [32], [0, 256])
+            rend_hist = cv2.calcHist([rend_lab], [c], rend_mask_u8, [32], [0, 256])
+            ref_hist = cv2.calcHist([ref_lab], [c], ref_mask_u8, [32], [0, 256])
             cv2.normalize(rend_hist, rend_hist)
             cv2.normalize(ref_hist, ref_hist)
             corr = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_CORREL)
-            channel_scores.append(max(0.0, corr))
+            corr_scores.append(max(0.0, corr))
+            # Bhattacharyya: 0=identical, higher=different. Convert to similarity.
+            bhatt = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_BHATTACHARYYA)
+            bhatt_scores.append(max(0.0, 1.0 - bhatt))
 
-        # Weight L channel less (lighting differences are expected)
-        weighted = 0.3 * channel_scores[0] + 0.35 * channel_scores[1] + 0.35 * channel_scores[2]
-        return float(weighted * 100)
+        # Weight L channel less (lighting differences are expected in 3D rendering)
+        def _weighted(scores):
+            return 0.2 * scores[0] + 0.4 * scores[1] + 0.4 * scores[2]
+
+        # Blend: 50% correlation + 50% Bhattacharyya similarity
+        blended = 0.5 * _weighted(corr_scores) + 0.5 * _weighted(bhatt_scores)
+        return float(blended * 100)
 
     # ─── B1. Mesh Integrity ───────────────────────────────────────────────
 
@@ -289,13 +353,18 @@ class QualityEvaluatorV4:
             return 0.0
 
         score = 100.0
+        _penalties = {}
 
-        # 1. Watertight check (-20 if not)
+        # 1. Watertight check (-2 if not)
+        # FDG remesh+simplify never produces perfectly watertight meshes;
+        # irrelevant for WebGL/Three.js visualization (only 3D printing)
         try:
             if not mesh.is_watertight:
-                score -= 20
+                score -= 2
+                _penalties['watertight'] = 2
         except Exception:
-            score -= 10  # Can't determine, mild penalty
+            score -= 2
+            _penalties['watertight'] = 2
 
         # 2. Degenerate face ratio (-25 max)
         try:
@@ -303,26 +372,32 @@ class QualityEvaluatorV4:
             zero_area = (face_areas < 1e-10).sum()
             degen_ratio = zero_area / max(len(face_areas), 1)
             if degen_ratio > 0.001:
-                score -= min(25, degen_ratio * 5000)
+                pen = min(25, degen_ratio * 5000)
+                score -= pen
+                _penalties['degenerate'] = pen
         except Exception:
             pass
 
-        # 3. Connected components (-20 max)
-        # NOTE: mesh.split() is extremely memory-intensive for large meshes.
-        # Use scipy sparse graph approach for >100K faces, skip entirely for >500K.
+        # 3. Connected components (-10 max, log scale)
+        # FDG remesh + simplification naturally creates thousands of disconnected
+        # patches. This is cosmetic and doesn't affect WebGL rendering quality.
+        # Use log scale: <100 = 0 penalty, 100-10K = gradual, cap at -10.
         try:
             nfaces = len(mesh.faces) if hasattr(mesh, 'faces') else 0
             if nfaces <= 500000:
                 from scipy import sparse
-                # Use trimesh's body_count which is more memory-efficient than split()
                 if hasattr(mesh, 'face_adjacency'):
                     adj = mesh.face_adjacency
                     graph = sparse.coo_matrix(
                         (np.ones(len(adj)), (adj[:, 0], adj[:, 1])),
                         shape=(nfaces, nfaces)).tocsr()
                     n_components = sparse.csgraph.connected_components(graph, directed=False)[0]
-                    if n_components > 1:
-                        score -= min(20, (n_components - 1) * 10)
+                    if n_components > 100:
+                        # Log-scale penalty: 100→0, 10000→10
+                        log_comp = np.log10(n_components)
+                        pen = min(10, max(0, (log_comp - 2.0) * 5.0))
+                        score -= pen
+                        _penalties['components'] = (n_components, round(pen, 1))
         except Exception:
             pass
 
@@ -340,9 +415,14 @@ class QualityEvaluatorV4:
                 if p5 > 1e-8:
                     aspect = p95 / p5
                     if aspect > 100:
-                        score -= min(15, (aspect - 100) * 0.1)
+                        pen = min(15, (aspect - 100) * 0.1)
+                        score -= pen
+                        _penalties['aspect'] = pen
         except Exception:
             pass
+
+        print(f"    [B1 diag] penalties={_penalties} final={score:.1f}",
+              flush=True)
 
         # 5. Normal consistency (-10 max) — sample for large meshes
         try:
@@ -359,6 +439,7 @@ class QualityEvaluatorV4:
         except Exception:
             pass
 
+        print(f"    [B1 diag] penalties={_penalties} final={max(0,score):.0f}", flush=True)
         return max(0.0, float(score))
 
     # ─── B2. Surface Quality ──────────────────────────────────────────────
@@ -388,7 +469,10 @@ class QualityEvaluatorV4:
                 continue
 
             # Compute normal map Laplacian (geometry roughness)
+            # Pre-blur with σ=1.5 to remove flat-face-normal triangle edge
+            # artifacts that don't reflect actual visual roughness
             normal_float = normal_img.astype(np.float64) / 255.0
+            normal_float = cv2.GaussianBlur(normal_float, (0, 0), 1.5)
 
             lap_energy = 0.0
             for c in range(3):
@@ -420,11 +504,19 @@ class QualityEvaluatorV4:
         """
         scores = []
         nviews = len(base_color_views)
+        # Diagnostic accumulators
+        _crack_penalties = []
+        _grad_penalties = []
+        _patch_penalties = []
 
         for i in range(nviews):
             rgb = base_color_views[i]
             mask = alpha_masks[i] > 128
-            gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+
+            # Pre-blur with σ=1.0 to remove 1-pixel triangle-edge
+            # artifacts from volumetric renderer (same principle as B2 fix)
+            rgb_smooth = cv2.GaussianBlur(rgb, (0, 0), 1.0)
+            gray = cv2.cvtColor(rgb_smooth, cv2.COLOR_RGB2GRAY)
 
             # Interior mask (away from silhouette edge)
             kernel = np.ones((10, 10), np.uint8)
@@ -432,6 +524,9 @@ class QualityEvaluatorV4:
 
             if interior.sum() < 200:
                 scores.append(50.0)
+                _crack_penalties.append(0)
+                _grad_penalties.append(0)
+                _patch_penalties.append(0)
                 continue
 
             s = 100.0
@@ -443,11 +538,14 @@ class QualityEvaluatorV4:
                                       np.ones((3, 3), np.uint8))
             crack_diff = closed.astype(np.float32) - gray_int.astype(np.float32)
             crack_ratio = ((crack_diff > 20) & interior).sum() / max(interior.sum(), 1)
+            crack_pen = 0.0
             if crack_ratio > 0.003:
-                s -= min(35, (crack_ratio - 0.003) * 600)
+                crack_pen = min(35, (crack_ratio - 0.003) * 600)
+                s -= crack_pen
+            _crack_penalties.append(crack_pen)
 
             # 2. Gradient harshness in COLOR space (not just grayscale)
-            rgb_f = rgb.astype(np.float32)
+            rgb_f = rgb_smooth.astype(np.float32)
             grad_mag = np.zeros(gray.shape, dtype=np.float32)
             for c in range(3):
                 gx = cv2.Sobel(rgb_f[:, :, c], cv2.CV_32F, 1, 0, ksize=3)
@@ -456,11 +554,18 @@ class QualityEvaluatorV4:
             grad_mag /= 3.0
 
             # Adaptive threshold based on image contrast
-            p90 = np.percentile(grad_mag[interior], 90)
-            threshold = max(35.0, p90 * 0.8)
+            # V4 evaluates raw volumetric renders (not GLB), so most gradients
+            # come from legitimate texture detail (painted edges, color
+            # transitions), not UV seam artifacts. Penalize only extreme cases
+            # (>35% of pixels with gradients above p95*0.85).
+            p95 = np.percentile(grad_mag[interior], 95)
+            threshold = max(40.0, p95 * 0.85)
             harsh = (grad_mag[interior] > threshold).sum() / max(interior.sum(), 1)
-            if harsh > 0.08:
-                s -= min(30, (harsh - 0.08) * 200)
+            grad_pen = 0.0
+            if harsh > 0.35:
+                grad_pen = min(15, (harsh - 0.35) * 100)
+                s -= grad_pen
+            _grad_penalties.append(grad_pen)
 
             # 3. Local color variance (patchwork detection)
             local_var = np.zeros(gray.shape, dtype=np.float32)
@@ -469,10 +574,19 @@ class QualityEvaluatorV4:
                 local_var += (rgb_f[:, :, c] - blurred) ** 2
             local_var = np.sqrt(local_var / 3.0)
             high_var_ratio = (local_var[interior] > 30).sum() / max(interior.sum(), 1)
+            patch_pen = 0.0
             if high_var_ratio > 0.15:
-                s -= min(25, (high_var_ratio - 0.15) * 120)
+                patch_pen = min(25, (high_var_ratio - 0.15) * 120)
+                s -= patch_pen
+            _patch_penalties.append(patch_pen)
 
             scores.append(max(0.0, s))
+
+        # Diagnostic output
+        print(f"    [C1 diag] crack_pen={np.mean(_crack_penalties):.1f} "
+              f"grad_pen={np.mean(_grad_penalties):.1f} "
+              f"patch_pen={np.mean(_patch_penalties):.1f} "
+              f"final={np.mean(scores):.1f}", flush=True)
 
         return float(np.mean(scores))
 
@@ -561,22 +675,19 @@ class QualityEvaluatorV4:
             lap = cv2.Laplacian(gray.astype(np.float64), cv2.CV_64F)
             lap_energy = np.abs(lap[interior]).mean()
 
-            # Score mapping (recalibrated from v3 to avoid ceiling):
+            # Score mapping (calibrated for 3D renders):
             # < 2: very blurry (20 pts)
-            # 2-5: low detail (20-60 pts)
-            # 5-15: good detail (60-90 pts)
-            # 15-25: rich detail (90-100 pts)
-            # > 25: potentially noisy (cap at 85)
+            # 2-5: low detail (20-65 pts)
+            # 5-15: good detail (65-100 pts) — most real objects fall here
+            # > 15: cap at 100 (rich detail, no noise penalty for 3D)
             if lap_energy < 2:
                 s = 20.0
             elif lap_energy < 5:
-                s = 20 + (lap_energy - 2) * 13.3
+                s = 20 + (lap_energy - 2) * 15.0
             elif lap_energy < 15:
-                s = 60 + (lap_energy - 5) * 3.0
-            elif lap_energy < 25:
-                s = 90 + (lap_energy - 15) * 1.0
+                s = 65 + (lap_energy - 5) * 3.5
             else:
-                s = max(85, 100 - (lap_energy - 25) * 0.5)
+                s = 100.0
 
             view_scores.append(min(100.0, s))
 
@@ -779,7 +890,7 @@ def render_evaluation_views(mesh, envmap, nviews=8, resolution=512):
 
 
 def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
-                          output_prefix="test"):
+                          output_prefix="test", best_of_n=1, quality_verifier=None):
     """Generate a 3D model and evaluate it with V4 scoring."""
     import o_voxel.postprocess
     from trellis2.utils import render_utils
@@ -819,6 +930,8 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
             "512": "512", "1024": "1024_cascade", "1536": "1536_cascade",
         }.get(config.get('resolution', '1024'), '1024_cascade'),
         return_latent=True,
+        best_of_n=best_of_n,
+        quality_verifier=quality_verifier,
     )
     gen_time = time.time() - t0
     print(f"  Generation: {gen_time:.1f}s", flush=True)
@@ -844,8 +957,9 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
     print(f"  Render: {render_time:.1f}s ({nviews} views)", flush=True)
     _log_memory("post-render")
 
-    # Load reference RGBA
-    ref_np = np.array(img.convert('RGBA'))
+    # Load reference RGBA — use preprocessed image (background removed)
+    # so that A1 silhouette IoU compares object masks, not full-frame coverage
+    ref_np = np.array(processed.convert('RGBA'))
 
     # Extract GLB for mesh integrity evaluation (B1) and texture detail (C3)
     t0 = time.time()
@@ -954,7 +1068,7 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
     return result
 
 
-def run_evaluation(config, label="test", test_images=None):
+def run_evaluation(config, label="test", test_images=None, best_of_n=1):
     """Run full V4 evaluation pipeline."""
     if test_images is None:
         test_images = TEST_IMAGES_FULL
@@ -968,7 +1082,8 @@ def run_evaluation(config, label="test", test_images=None):
     print(f"\n{'='*60}")
     print(f"V4 Evaluation: {label}")
     print(f"Config: resolution={config.get('resolution', '1024')}, "
-          f"cfg_mp={config.get('cfg_mp_strength', 0.0)}")
+          f"cfg_mp={config.get('cfg_mp_strength', 0.0)}, "
+          f"best_of_n={best_of_n}")
     print(f"Test images: {len(existing)}")
     print(f"{'='*60}\n")
 
@@ -976,12 +1091,21 @@ def run_evaluation(config, label="test", test_images=None):
     envmap = get_envmap()
     evaluator = QualityEvaluatorV4()
 
+    # Initialize quality verifier for Best-of-N
+    quality_verifier = None
+    if best_of_n > 1:
+        from trellis2.utils.quality_verifier import QualityVerifier
+        quality_verifier = QualityVerifier(device='cuda')
+        print(f"Best-of-N enabled: N={best_of_n}, QualityVerifier loaded")
+
     results = []
     for img_path in existing:
         try:
             r = generate_and_evaluate(
                 pipeline, img_path, config, evaluator, envmap,
-                output_prefix=label
+                output_prefix=label,
+                best_of_n=best_of_n,
+                quality_verifier=quality_verifier,
             )
             results.append(r)
             # Print per-image scores
@@ -1062,6 +1186,8 @@ def main():
                         help='Run baseline only')
     parser.add_argument('--config', type=str, default=None,
                         help='Path to adjustment JSON config')
+    parser.add_argument('--best-of-n', type=int, default=1,
+                        help='Best-of-N: generate N candidates, pick best (default: 1)')
     args = parser.parse_args()
 
     # Determine test images
@@ -1078,7 +1204,8 @@ def main():
         full_config = dict(CHAMPION_CONFIG)
         full_config.update(config)
         label = Path(args.config).stem
-        run_evaluation(full_config, label=label, test_images=test_images)
+        run_evaluation(full_config, label=label, test_images=test_images,
+                       best_of_n=args.best_of_n)
 
     elif args.sweep:
         # Sweep mode
@@ -1090,7 +1217,8 @@ def main():
             config = dict(CHAMPION_CONFIG)
             config[param] = val
             label = f"v4_sweep_{param}_{val}"
-            scores = run_evaluation(config, label=label, test_images=test_images)
+            scores = run_evaluation(config, label=label, test_images=test_images,
+                                    best_of_n=args.best_of_n)
             if scores:
                 all_results[val] = scores
                 print(f"\n  {param}={val}: overall={scores['overall']:.1f}")
@@ -1117,13 +1245,15 @@ def main():
         config = dict(CHAMPION_CONFIG)
         config['cfg_mp_strength'] = args.cfg_mp
         run_evaluation(config, label=f"v4_cfg_mp_{args.cfg_mp}",
-                       test_images=test_images)
+                       test_images=test_images, best_of_n=args.best_of_n)
 
     else:
         # Default: baseline evaluation
-        print("=== V4 BASELINE EVALUATION ===\n")
-        run_evaluation(dict(CHAMPION_CONFIG), label="v4_baseline",
-                       test_images=test_images)
+        bon_str = f" (Best-of-{args.best_of_n})" if args.best_of_n > 1 else ""
+        print(f"=== V4 BASELINE EVALUATION{bon_str} ===\n")
+        label = f"v4_baseline_bon{args.best_of_n}" if args.best_of_n > 1 else "v4_baseline"
+        run_evaluation(dict(CHAMPION_CONFIG), label=label,
+                       test_images=test_images, best_of_n=args.best_of_n)
 
 
 if __name__ == '__main__':

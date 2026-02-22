@@ -5,6 +5,64 @@ Uses genetic algorithm principles: keep good parameters, replace bad ones, conti
 
 ---
 
+## Survey v6: Practical Methods for Texture Coherence (C1) and Color Vitality (C2) (2026-02-22)
+
+### Scope
+Targeted survey of actionable methods to improve texture quality in TRELLIS.2's postprocess pipeline. Focused on C1 (texture coherence, 15pts) and C2 (color vitality, 10pts) metrics. Constraint: implementable in 1-2 days with existing infrastructure.
+
+### Key Findings
+
+1. **Root cause of grey patches is trilinear interpolation at sparse voxel boundaries**
+   - grid_sample_3d interpolates toward zero when neighbor voxels are empty
+   - A surface point with 3/8 empty neighbors gets 37-50% color dilution
+   - BVH reprojection helps (41.5% grey without vs 13.8% with) but doesn't eliminate the issue
+   - Fix: occupancy-normalized interpolation (divide by occupancy fraction)
+
+2. **cv2.inpaint (Telea, radius=3) is inadequate for UV padding**
+   - Averages colors across UV islands, creating muddy seam colors
+   - 3px padding insufficient for mipmapping (becomes 1.5px at 2x downsample)
+   - Industry standard: 4-8px padding (Substance Painter default: 8px)
+   - Fix: push-pull pyramid algorithm that extends each island's color outward
+
+3. **Current grey recovery misses partial desaturation (chroma 18-35)**
+   - Threshold of chroma < 18 only catches severe cases
+   - Local saturation context needed: a texel with chroma 30 is desaturated if neighbors average 80
+   - Fix: local-context chroma deficit detection + adaptive saturation boost
+
+4. **Seam detection by mask erosion is imprecise**
+   - Detects ALL mask boundaries, not just UV chart boundaries
+   - Over-smooths legitimate texture edges, under-smooths actual seams
+   - Fix: use rasterized face ID discontinuities to detect actual seams
+
+5. **TextureRefiner has coordinate system mismatch**
+   - Postprocess applies Y/Z swap + Y flip, refiner camera doesn't account for this
+   - LPIPS at 256x256 is too low resolution
+   - Missing saturation preservation and color histogram losses
+
+### 8 Ranked Methods
+
+| Rank | Method | C1 Impact | C2 Impact | Effort |
+|------|--------|-----------|-----------|--------|
+| 1 | Push-Pull Texture Padding | +3-5 | +1-2 | 4-6h |
+| 2 | Chroma-Aware Sampling/Recovery | +1-2 | +3-5 | 4-8h |
+| 3 | UV-Aware Seam Smoothing | +2-4 | 0 | 3-5h |
+| 4 | Saturation Boost in HSV | 0 | +2-3 | 1-2h |
+| 5 | Enhanced TextureRefiner | +3-5 | +2-4 | 6-10h |
+| 6 | Increased Dilation Padding | +1-3 | 0 | 2-3h |
+| 7 | Bilateral Denoise | +1-2 | 0 | 2-3h |
+| 8 | UV Island Stitching | +2-3 | 0 | 8-12h |
+
+### Recommended Day 1 (highest ROI)
+- Saturation Boost (1-2h, C2 +2-3)
+- Push-Pull Padding (4-6h, C1 +3-5)
+- Chroma-Aware Recovery Solution A (2-3h, C2 +3-5)
+- Expected: C1 +4-7pts, C2 +6-10pts
+
+### File
+`TRELLIS.2/optimization/research/survey_texture_coherence_vitality_2026_02.md`
+
+---
+
 ## Survey v5: Commercial-Grade Mesh Quality Evaluation for 5 Specific Defects (2026-02-22)
 
 ### Scope

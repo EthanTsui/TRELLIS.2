@@ -940,13 +940,18 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         out_mesh = []
         for m, v in zip(meshes, tex_voxels):
             m.fill_holes(max_hole_perimeter=0.3)
+            # Clamp PBR attrs for material plausibility:
+            # metallic ∈ [0, 0.05], roughness ∈ [0.4, 1.0]
+            feats = v.feats
+            feats[:, 3:4] = feats[:, 3:4].clamp(0.0, 0.05)
+            feats[:, 4:5] = feats[:, 4:5].clamp(0.4, 1.0)
             out_mesh.append(
                 MeshWithVoxel(
                     m.vertices, m.faces,
                     origin = [-0.5, -0.5, -0.5],
                     voxel_size = 1 / resolution,
                     coords = v.coords[:, 1:],
-                    attrs = v.feats,
+                    attrs = feats,
                     voxel_shape = torch.Size([*v.shape, *v.spatial_shape]),
                     layout=self.pbr_attr_layout
                 )
@@ -1153,12 +1158,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                     meshes = result
 
                 mesh = meshes[0]
-                score_dict = quality_verifier.score(mesh, ref_image, use_dreamsim=True)
+                score_dict = quality_verifier.score(mesh, ref_image)
                 all_scores.append(score_dict)
-                ds_str = f", dreamsim={score_dict['dreamsim']:.3f}" if 'dreamsim' in score_dict else ""
                 print(f"  Candidate {i+1}: total={score_dict['total']:.3f} "
-                      f"(lpips={score_dict['lpips']:.3f}, geo={score_dict['geometric']:.3f}, "
-                      f"color={score_dict['color_richness']:.3f}{ds_str})")
+                      f"(dice={score_dict.get('silhouette_dice', 0):.3f}, "
+                      f"color={score_dict.get('color_match', 0):.3f}, "
+                      f"geo={score_dict.get('geometric', 0):.3f}, "
+                      f"tex={score_dict.get('tex_coherence', 0):.3f}, "
+                      f"detail={score_dict.get('detail_richness', 0):.3f})")
 
                 if score_dict['total'] > best_score:
                     old_result = best_result

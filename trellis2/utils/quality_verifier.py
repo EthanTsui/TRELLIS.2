@@ -1,9 +1,9 @@
 """
 Quality verification for Best-of-N candidate selection.
 
-Uses LPIPS perceptual distance, color richness analysis, and geometric
-heuristics to score generated 3D meshes against input reference images.
-DreamSim support is optional (lazy-loaded if available).
+V4-aligned scoring: uses the same metrics as auto_evaluate_v4.py
+(silhouette Dice, LAB histogram, texture coherence, detail richness)
+so that Best-of-N selection maximizes V4 evaluation scores.
 """
 
 import torch
@@ -151,7 +151,8 @@ class QualityVerifier:
     def compute_geometric_score(self, mesh) -> float:
         """Score geometric quality of the mesh.
 
-        Checks vertex/face count, degenerate faces, bounding box aspect ratio.
+        Checks vertex/face count, degenerate faces, bounding box aspect ratio,
+        and connected components (fragmentation).
 
         Returns:
             Score in [0, 1] where 1 = excellent geometry.
@@ -186,6 +187,26 @@ class QualityVerifier:
             if aspect > 10:
                 score *= 0.7
 
+        # Connected components via vertex adjacency graph — fast O(V+F)
+        try:
+            from scipy import sparse
+            faces_np = mesh.faces.cpu().numpy()
+            # Build vertex adjacency graph from triangle edges
+            v0, v1, v2 = faces_np[:, 0], faces_np[:, 1], faces_np[:, 2]
+            rows = np.concatenate([v0, v1, v2, v1, v2, v0])
+            cols = np.concatenate([v1, v2, v0, v0, v1, v2])
+            graph = sparse.coo_matrix(
+                (np.ones(len(rows), dtype=np.float32), (rows, cols)),
+                shape=(n_verts, n_verts)
+            ).tocsr()
+            n_components = sparse.csgraph.connected_components(graph, directed=False)[0]
+            if n_components > 1:
+                # Harsh penalty: fragmented mesh is unusable
+                # 2 components -> 0.3, 5+ -> 0.1
+                score *= max(0.1, 0.5 / n_components)
+        except Exception:
+            pass
+
         return score
 
     def compute_color_richness(self, renders: Dict) -> float:
@@ -214,6 +235,70 @@ class QualityVerifier:
             scores.append(colorful_ratio)
 
         return float(np.mean(scores)) if scores else 0.5
+
+    def compute_color_match(self, renders: Dict, reference_image) -> float:
+        """Compare color distributions in LAB space (A2-aligned metric).
+
+        Uses histogram correlation between rendered front view and reference
+        image in LAB color space, matching V4's A2_color_dist methodology.
+
+        Returns:
+            Score in [0, 1] where 1 = identical color distribution.
+        """
+        import cv2
+
+        if 'base_color' not in renders or len(renders['base_color']) == 0:
+            return 0.5
+
+        front_render = renders['base_color'][0]  # [H, W, 3] uint8 RGB
+        alpha = renders.get('alpha', [None])[0]
+
+        # Prepare reference
+        if isinstance(reference_image, Image.Image):
+            ref = reference_image.convert('RGBA')
+            ref_np = np.array(ref)
+        elif isinstance(reference_image, np.ndarray):
+            ref_np = reference_image
+        else:
+            return 0.5
+
+        h, w = front_render.shape[:2]
+        if ref_np.shape[:2] != (h, w):
+            ref_np = cv2.resize(ref_np, (w, h))
+
+        # Masks
+        if alpha is not None:
+            rend_mask = (alpha > 128).astype(np.uint8)
+        else:
+            gray = cv2.cvtColor(front_render, cv2.COLOR_RGB2GRAY)
+            rend_mask = (gray > 5).astype(np.uint8)
+
+        if ref_np.shape[2] == 4:
+            ref_mask = (ref_np[:, :, 3] > 128).astype(np.uint8)
+        else:
+            ref_mask = np.ones((h, w), dtype=np.uint8)
+
+        if rend_mask.sum() < 100 or ref_mask.sum() < 100:
+            return 0.5
+
+        # Convert to LAB
+        rend_lab = cv2.cvtColor(front_render, cv2.COLOR_RGB2LAB)
+        ref_rgb = ref_np[:, :, :3]
+        ref_lab = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2LAB)
+
+        # Histogram correlation (A and B channels weighted higher)
+        corr_scores = []
+        for c in range(3):
+            rend_hist = cv2.calcHist([rend_lab], [c], rend_mask, [32], [0, 256])
+            ref_hist = cv2.calcHist([ref_lab], [c], ref_mask, [32], [0, 256])
+            cv2.normalize(rend_hist, rend_hist)
+            cv2.normalize(ref_hist, ref_hist)
+            corr = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_CORREL)
+            corr_scores.append(max(0.0, corr))
+
+        # Weight: L=0.2, A=0.4, B=0.4 (lighting less important)
+        weighted = 0.2 * corr_scores[0] + 0.4 * corr_scores[1] + 0.4 * corr_scores[2]
+        return float(weighted)
 
     @torch.no_grad()
     def compute_depth_consistency(
@@ -281,6 +366,164 @@ class QualityVerifier:
         except Exception:
             return 0.5
 
+    def compute_silhouette_dice(self, renders: Dict,
+                               reference_image: Union[Image.Image, np.ndarray]) -> float:
+        """Scale-invariant Dice coefficient between rendered and reference silhouettes.
+
+        Mirrors V4 A1_silhouette: crops both masks to bounding box, resizes to
+        256x256, then computes Dice = 2*|A∩B| / (|A|+|B|).
+        Takes the best-matching view among all rendered views.
+
+        Returns:
+            Score in [0, 1] where 1 = perfect shape match.
+        """
+        import cv2
+
+        # Extract reference alpha
+        if isinstance(reference_image, Image.Image):
+            ref_np = np.array(reference_image.convert('RGBA'))
+        elif isinstance(reference_image, np.ndarray):
+            ref_np = reference_image
+        else:
+            return 0.5
+
+        if ref_np.shape[2] < 4:
+            return 0.5
+
+        ref_alpha = ref_np[:, :, 3]
+
+        def _crop_to_bbox(mask_uint8, pad_frac=0.05):
+            binary = (mask_uint8 > 128).astype(np.uint8)
+            coords = np.argwhere(binary > 0)
+            if len(coords) < 10:
+                return np.zeros((256, 256), dtype=np.float32)
+            y0, x0 = coords.min(axis=0)
+            y1, x1 = coords.max(axis=0)
+            side = max(y1 - y0 + 1, x1 - x0 + 1)
+            pad = int(side * pad_frac)
+            cy, cx = (y0 + y1) // 2, (x0 + x1) // 2
+            half = side // 2 + pad
+            H, W = mask_uint8.shape[:2]
+            sy, ey = max(0, cy - half), min(H, cy + half)
+            sx, ex = max(0, cx - half), min(W, cx + half)
+            crop = mask_uint8[sy:ey, sx:ex]
+            if crop.size == 0:
+                return np.zeros((256, 256), dtype=np.float32)
+            resized = cv2.resize(crop, (256, 256), interpolation=cv2.INTER_LINEAR)
+            return (resized > 128).astype(np.float32)
+
+        ref_norm = _crop_to_bbox(ref_alpha)
+
+        alphas = renders.get('alpha', [])
+        if not alphas:
+            return 0.5
+
+        best_dice = 0.0
+        for alpha_view in alphas:
+            if alpha_view.ndim == 3:
+                alpha_view = alpha_view[:, :, 0]
+            rend_norm = _crop_to_bbox(alpha_view)
+            intersection = (rend_norm * ref_norm).sum()
+            total = rend_norm.sum() + ref_norm.sum()
+            dice = 2 * intersection / max(total, 1)
+            best_dice = max(best_dice, float(dice))
+
+        return best_dice
+
+    def compute_texture_coherence(self, renders: Dict) -> float:
+        """Simplified V4 C1 texture coherence check.
+
+        Detects morphological cracks and harsh gradient discontinuities
+        in the base_color renders. Returns worst-view score.
+
+        Returns:
+            Score in [0, 1] where 1 = perfectly coherent texture.
+        """
+        import cv2
+
+        if 'base_color' not in renders:
+            return 0.5
+
+        scores = []
+        for bc in renders['base_color']:
+            alpha = renders.get('alpha', [None])[0]
+            rgb_smooth = cv2.GaussianBlur(bc, (0, 0), 1.0)
+            gray = cv2.cvtColor(rgb_smooth, cv2.COLOR_RGB2GRAY)
+
+            # Use simple foreground mask from brightness
+            fg = cv2.cvtColor(bc, cv2.COLOR_RGB2GRAY) > 5
+            kernel = np.ones((8, 8), np.uint8)
+            interior = cv2.erode(fg.astype(np.uint8), kernel) > 0
+            if interior.sum() < 200:
+                scores.append(0.5)
+                continue
+
+            s = 1.0
+            # Morphological crack detection
+            gray_int = gray.copy()
+            gray_int[~interior] = 128
+            closed = cv2.morphologyEx(gray_int, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+            crack_diff = closed.astype(np.float32) - gray_int.astype(np.float32)
+            crack_ratio = ((crack_diff > 20) & interior).sum() / max(interior.sum(), 1)
+            if crack_ratio > 0.003:
+                s -= min(0.35, (crack_ratio - 0.003) * 6.0)
+
+            # Color gradient harshness
+            rgb_f = rgb_smooth.astype(np.float32)
+            grad_mag = np.zeros(gray.shape, dtype=np.float32)
+            for c in range(3):
+                gx = cv2.Sobel(rgb_f[:, :, c], cv2.CV_32F, 1, 0, ksize=3)
+                gy = cv2.Sobel(rgb_f[:, :, c], cv2.CV_32F, 0, 1, ksize=3)
+                grad_mag += np.sqrt(gx**2 + gy**2)
+            grad_mag /= 3.0
+            p95 = np.percentile(grad_mag[interior], 95)
+            threshold = max(40.0, p95 * 0.85)
+            harsh = (grad_mag[interior] > threshold).sum() / max(interior.sum(), 1)
+            if harsh > 0.35:
+                s -= min(0.15, (harsh - 0.35) * 1.0)
+
+            scores.append(max(0.0, s))
+
+        return float(np.mean(scores)) if scores else 0.5
+
+    def compute_detail_richness(self, renders: Dict) -> float:
+        """Simplified V4 C3 detail richness check.
+
+        Measures Laplacian energy of base_color as a proxy for texture detail.
+
+        Returns:
+            Score in [0, 1] where 1 = rich texture detail.
+        """
+        import cv2
+
+        if 'base_color' not in renders:
+            return 0.5
+
+        energies = []
+        for bc in renders['base_color']:
+            gray = cv2.cvtColor(bc, cv2.COLOR_RGB2GRAY)
+            fg = gray > 5
+            kernel = np.ones((8, 8), np.uint8)
+            interior = cv2.erode(fg.astype(np.uint8), kernel) > 0
+            if interior.sum() < 200:
+                continue
+            lap = cv2.Laplacian(gray.astype(np.float64) / 255.0, cv2.CV_64F)
+            energies.append(np.abs(lap[interior]).mean() * 100)
+
+        if not energies:
+            return 0.5
+
+        lap_energy = float(np.mean(energies))
+        # Same curve as V4 C3 but mapped to [0, 1]
+        if lap_energy < 2:
+            return 0.2
+        elif lap_energy < 5:
+            return 0.2 + (lap_energy - 2) * 0.15
+        elif lap_energy < 15:
+            return 0.65 + (lap_energy - 5) * 0.035
+        else:
+            return 1.0
+
     @torch.no_grad()
     def score(
         self,
@@ -293,19 +536,21 @@ class QualityVerifier:
     ) -> Dict[str, float]:
         """Score a generated mesh against the reference image.
 
+        V4-aligned scoring: uses the same metrics as auto_evaluate_v4.py
+        so Best-of-N selection picks candidates that maximize V4 score.
+
         Args:
             mesh: MeshWithVoxel or similar renderable mesh.
             reference_image: Input image (PIL RGBA or numpy array).
             num_views: Number of views to render for scoring.
             render_resolution: Resolution for renders.
-            use_dreamsim: Whether to use DreamSim (requires dreamsim package).
-            depth_estimator: Optional DepthEstimator for depth consistency scoring.
+            use_dreamsim: Whether to use DreamSim (unused, kept for API compat).
+            depth_estimator: Optional DepthEstimator (unused, kept for API compat).
 
         Returns:
             Dict with 'total' score (0-1) and individual component scores.
         """
         # Create a shallow copy for scoring to avoid mutating the original mesh.
-        # Mesh.simplify() replaces .vertices and .faces in-place.
         from ..representations.mesh import MeshWithVoxel
         score_mesh = MeshWithVoxel(
             vertices=mesh.vertices.clone(),
@@ -321,56 +566,55 @@ class QualityVerifier:
 
         renders = self.render_views(score_mesh, num_views, render_resolution)
 
-        # 1. Perceptual similarity (front view vs reference)
-        front_render = renders['base_color'][0]
-        lpips_score = self.compute_lpips(front_render, reference_image)
+        # V4-aligned scoring components:
+        # A1: Silhouette Dice (scale-invariant, best-view)
+        silhouette = self.compute_silhouette_dice(renders, reference_image)
 
-        # 2. Optional DreamSim
-        dreamsim_score = None
-        if use_dreamsim:
-            dreamsim_score = self.compute_dreamsim(front_render, reference_image)
+        # A2: Color distribution match (LAB histogram)
+        color_match = self.compute_color_match(renders, reference_image)
 
-        # 3. Geometric quality
+        # B1: Geometric quality (connected components, degenerate faces)
         geo_score = self.compute_geometric_score(score_mesh)
 
-        # 4. Color richness
-        color_score = self.compute_color_richness(renders)
+        # C1: Texture coherence (crack + gradient detection)
+        tex_coherence = self.compute_texture_coherence(renders)
 
-        # 5. Optional depth consistency
-        depth_score = None
-        if depth_estimator is not None:
-            depth_score = self.compute_depth_consistency(mesh, reference_image, depth_estimator)
+        # C2: Color richness (chroma)
+        color_richness = self.compute_color_richness(renders)
 
-        # Weighted total
-        if dreamsim_score is not None:
-            perceptual = 0.5 * lpips_score + 0.5 * dreamsim_score
-        else:
-            perceptual = lpips_score
+        # C3: Detail richness (Laplacian energy)
+        detail = self.compute_detail_richness(renders)
 
-        if depth_score is not None:
-            total = 0.4 * perceptual + 0.15 * geo_score + 0.25 * color_score + 0.2 * depth_score
-        else:
-            total = 0.5 * perceptual + 0.2 * geo_score + 0.3 * color_score
+        # Weighted total — mirrors V4 weight distribution:
+        # A1(15) + A2(10) + B1(10) + C1(15) + C2(10) + C3(10) = 70 of 100
+        # (B2, D1, E1 excluded: low variance between seeds)
+        total = (0.22 * silhouette       # A1: 15/70
+                 + 0.14 * color_match     # A2: 10/70
+                 + 0.14 * geo_score       # B1: 10/70
+                 + 0.22 * tex_coherence   # C1: 15/70
+                 + 0.14 * color_richness  # C2: 10/70
+                 + 0.14 * detail)         # C3: 10/70
 
         result = {
             'total': total,
-            'lpips': lpips_score,
+            'silhouette_dice': silhouette,
+            'color_match': color_match,
             'geometric': geo_score,
-            'color_richness': color_score,
+            'tex_coherence': tex_coherence,
+            'color_richness': color_richness,
+            'detail_richness': detail,
         }
-        if dreamsim_score is not None:
-            result['dreamsim'] = dreamsim_score
-        if depth_score is not None:
-            result['depth_consistency'] = depth_score
 
         return result
 
     def cleanup(self):
         """Release model memory."""
-        del self._lpips_fn
-        del self._dreamsim_model
-        del self._dreamsim_preprocess
-        self._lpips_fn = None
-        self._dreamsim_model = None
-        self._dreamsim_preprocess = None
+        if self._lpips_fn is not None:
+            del self._lpips_fn
+            self._lpips_fn = None
+        if self._dreamsim_model is not None:
+            del self._dreamsim_model
+            del self._dreamsim_preprocess
+            self._dreamsim_model = None
+            self._dreamsim_preprocess = None
         torch.cuda.empty_cache()

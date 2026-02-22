@@ -12,6 +12,59 @@ import nvdiffrast.torch as dr
 import cumesh
 
 
+def _push_pull_padding(texture, mask, levels=6):
+    """Push-pull pyramid padding for UV texture maps.
+
+    Fills invalid texels by propagating colors from valid regions without
+    cross-island contamination. Much better than cv2.inpaint for UV maps.
+
+    Args:
+        texture: (H, W, C) uint8 array
+        mask: (H, W) bool array of valid texels
+        levels: Number of pyramid levels
+
+    Returns:
+        (H, W, C) uint8 array with all texels filled
+    """
+    h, w = texture.shape[:2]
+    tex_f = texture.astype(np.float32)
+    weight = mask.astype(np.float32)
+
+    # Push phase: build pyramid by downsampling
+    pyramid_tex = [tex_f]
+    pyramid_w = [weight]
+    for _ in range(levels):
+        # Weighted average downsampling
+        tex_weighted = pyramid_tex[-1] * pyramid_w[-1][..., None]
+        down_tw = cv2.resize(tex_weighted, (max(1, pyramid_tex[-1].shape[1] // 2),
+                                             max(1, pyramid_tex[-1].shape[0] // 2)),
+                             interpolation=cv2.INTER_AREA)
+        down_w = cv2.resize(pyramid_w[-1], (down_tw.shape[1], down_tw.shape[0]),
+                            interpolation=cv2.INTER_AREA)
+        safe_w = np.maximum(down_w, 1e-6)
+        down_tex = down_tw / safe_w[..., None]
+        pyramid_tex.append(down_tex)
+        pyramid_w.append(down_w)
+
+    # Pull phase: reconstruct from coarse to fine
+    result = pyramid_tex[-1]
+    result_w = (pyramid_w[-1] > 0.01).astype(np.float32)
+
+    for lev in range(levels - 1, -1, -1):
+        # Upsample coarse result to fine resolution
+        fh, fw = pyramid_tex[lev].shape[:2]
+        up_result = cv2.resize(result, (fw, fh), interpolation=cv2.INTER_LINEAR)
+        up_w = cv2.resize(result_w, (fw, fh), interpolation=cv2.INTER_LINEAR)
+
+        # Use fine-level data where available, coarse fill elsewhere
+        fine_w = pyramid_w[lev]
+        has_fine = fine_w > 0.01
+        result = np.where(has_fine[..., None], pyramid_tex[lev], up_result)
+        result_w = np.where(has_fine, 1.0, up_w)
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
 def _detect_uv_seams(mask, uvs, faces, texture_size, width=3):
     """Detect UV seam boundaries in texture space.
 
@@ -608,10 +661,10 @@ def to_glb(
             blended = blend * avg_color[grey_texels] + (1 - blend) * bc_float[grey_texels]
             base_color[grey_texels] = np.clip(blended, 0, 255).astype(np.uint8)
 
-    # Inpainting: fill gaps to prevent black seams at UV boundaries
-    # Use small radius to match upstream behavior (3 for color, 1 for material)
+    # Texture padding: fill gaps to prevent black seams at UV boundaries
+    # Push-pull padding for base_color (prevents cross-island contamination)
+    base_color = _push_pull_padding(base_color, mask, levels=6)
     mask_inv = (~mask).astype(np.uint8)
-    base_color = cv2.inpaint(base_color, mask_inv, 3, cv2.INPAINT_TELEA)
     metallic = cv2.inpaint(metallic, mask_inv, 1, cv2.INPAINT_TELEA)[..., None]
     roughness = cv2.inpaint(roughness if roughness.ndim == 2 else roughness[..., 0], mask_inv, 1, cv2.INPAINT_TELEA)[..., None]
     alpha = cv2.inpaint(alpha, mask_inv, 1, cv2.INPAINT_TELEA)[..., None]
