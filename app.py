@@ -781,7 +781,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 with gr.Step("Preview", id=0):
                     preview_output = gr.HTML(empty_html, label="3D Asset Preview", show_label=True, container=True)
                     with gr.Row():
-                        enable_texture_refinement = gr.Checkbox(label="Texture Refinement (render-and-compare)", value=False)
+                        enable_texture_refinement = gr.Checkbox(label="Texture Refinement (render-and-compare)", value=True)
                         texture_refine_iters = gr.Slider(10, 100, label="Refinement Iterations", value=50, step=10)
                     extract_btn = gr.Button("Extract GLB")
                 with gr.Step("Extract", id=1):
