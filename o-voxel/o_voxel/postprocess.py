@@ -322,7 +322,7 @@ def to_glb(
         trimesh.smoothing.filter_taubin(
             tm,
             lamb=mesh_smooth_lamb,
-            nu=-mesh_smooth_lamb - 0.01,  # slightly stronger shrink-back
+            nu=mesh_smooth_lamb + 0.01,  # positive nu for correct shrink-dilate alternation
             iterations=mesh_smooth_iterations,
         )
         smoothed_verts = torch.tensor(tm.vertices, dtype=torch.float32, device=vertices.device)
