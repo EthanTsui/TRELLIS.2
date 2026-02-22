@@ -1,0 +1,106 @@
+{
+  "timestamp": "2026-02-22T01:03:10.910545",
+  "elapsed_min": 238.4,
+  "generation": 31,
+  "total_evaluated": 6,
+  "best_id": "v5g28-004",
+  "best_score": 57.62,
+  "best_params": {
+    "tex_slat_guidance_strength": 12.5,
+    "tex_slat_guidance_rescale": 0.95,
+    "tex_slat_sampling_steps": 16,
+    "tex_slat_rescale_t": 3.5,
+    "shape_slat_guidance_strength": 10.0,
+    "shape_slat_guidance_rescale": 0.5,
+    "shape_slat_sampling_steps": 18,
+    "ss_guidance_strength": 10.0,
+    "ss_guidance_rescale": 0.8
+  },
+  "top5": [
+    {
+      "id": "v5g28-004",
+      "score": 57.62,
+      "dims": {
+        "A1_silhouette": 16.89,
+        "A2_color": 34.67,
+        "A3_detail": 24.85,
+        "B1_smoothness": 31.0,
+        "B2_holes": 100.0,
+        "B3_fragmentation": 41.94,
+        "C1_coherence": 78.79,
+        "C2_vitality": 94.32,
+        "C3_consistency": 100.0,
+        "D1_contour": 43.79,
+        "D2_material": 100.0
+      }
+    },
+    {
+      "id": "v5g31-003",
+      "score": 56.9,
+      "dims": {
+        "A1_silhouette": 17.15,
+        "A2_color": 34.49,
+        "A3_detail": 24.93,
+        "B1_smoothness": 31.73,
+        "B2_holes": 100.0,
+        "B3_fragmentation": 27.21,
+        "C1_coherence": 79.2,
+        "C2_vitality": 97.4,
+        "C3_consistency": 100.0,
+        "D1_contour": 44.02,
+        "D2_material": 100.0
+      }
+    },
+    {
+      "id": "v5g31-001",
+      "score": 55.99,
+      "dims": {
+        "A1_silhouette": 13.9,
+        "A2_color": 33.36,
+        "A3_detail": 23.26,
+        "B1_smoothness": 33.71,
+        "B2_holes": 100.0,
+        "B3_fragmentation": 37.77,
+        "C1_coherence": 75.93,
+        "C2_vitality": 95.24,
+        "C3_consistency": 100.0,
+        "D1_contour": 38.22,
+        "D2_material": 100.0
+      }
+    },
+    {
+      "id": "v5g31-005",
+      "score": 55.790000915527344,
+      "dims": {
+        "A1_silhouette": 13.56,
+        "A2_color": 32.1,
+        "A3_detail": 23.44,
+        "B1_smoothness": 34.06,
+        "B2_holes": 100.0,
+        "B3_fragmentation": 34.08,
+        "C1_coherence": 80.36,
+        "C2_vitality": 94.57,
+        "C3_consistency": 98.4000015258789,
+        "D1_contour": 36.76,
+        "D2_material": 100.0
+      }
+    },
+    {
+      "id": "v5g31-004",
+      "score": 55.459999084472656,
+      "dims": {
+        "A1_silhouette": 14.18,
+        "A2_color": 34.51,
+        "A3_detail": 23.81,
+        "B1_smoothness": 33.21,
+        "B2_holes": 100.0,
+        "B3_fragmentation": 33.13,
+        "C1_coherence": 77.98,
+        "C2_vitality": 91.21,
+        "C3_consistency": 96.72000122070312,
+        "D1_contour": 38.24,
+        "D2_material": 100.0
+      }
+    }
+  ]
+}

@@ -1,0 +1,505 @@
+{
+  "version": "v5.0",
+  "description": "V5 GA: mesh defects + view comparison + better calibration",
+  "generation": 31,
+  "population_size": 6,
+  "elite_ratio": 0.25,
+  "mutation_rate": 0.15,
+  "crossover_rate": 0.6,
+  "parameter_bounds": {
+    "tex_slat_guidance_strength": {
+      "min": 5.0,
+      "max": 15.0,
+      "type": "float",
+      "step": 0.5
+    },
+    "tex_slat_guidance_rescale": {
+      "min": 0.7,
+      "max": 1.0,
+      "type": "float",
+      "step": 0.05
+    },
+    "tex_slat_sampling_steps": {
+      "min": 10,
+      "max": 20,
+      "type": "int",
+      "step": 2
+    },
+    "tex_slat_rescale_t": {
+      "min": 2.0,
+      "max": 6.0,
+      "type": "float",
+      "step": 0.5
+    },
+    "shape_slat_guidance_strength": {
+      "min": 7.0,
+      "max": 14.0,
+      "type": "float",
+      "step": 0.5
+    },
+    "shape_slat_guidance_rescale": {
+      "min": 0.3,
+      "max": 0.8,
+      "type": "float",
+      "step": 0.05
+    },
+    "shape_slat_sampling_steps": {
+      "min": 10,
+      "max": 20,
+      "type": "int",
+      "step": 2
+    },
+    "ss_guidance_strength": {
+      "min": 7.0,
+      "max": 14.0,
+      "type": "float",
+      "step": 0.5
+    },
+    "ss_guidance_rescale": {
+      "min": 0.5,
+      "max": 0.9,
+      "type": "float",
+      "step": 0.05
+    }
+  },
+  "fixed_params": {
+    "resolution": "512",
+    "multiview_mode": "concat",
+    "texture_multiview_mode": "tapa",
+    "ss_rescale_t": 5.0,
+    "shape_slat_rescale_t": 3.0,
+    "ss_sampling_steps": 12,
+    "cfg_mode": "standard",
+    "guidance_schedule": "binary"
+  },
+  "individuals": [
+    {
+      "id": "v5g28-004",
+      "generation": 31,
+      "origin": "elite_from_gen30",
+      "params": {
+        "tex_slat_guidance_strength": 12.5,
+        "tex_slat_guidance_rescale": 0.95,
+        "tex_slat_sampling_steps": 16,
+        "tex_slat_rescale_t": 3.5,
+        "shape_slat_guidance_strength": 10.0,
+        "shape_slat_guidance_rescale": 0.5,
+        "shape_slat_sampling_steps": 18,
+        "ss_guidance_strength": 10.0,
+        "ss_guidance_rescale": 0.8
+      },
+      "fitness": {
+        "overall": 57.62,
+        "per_example": {
+          "4": {
+            "A": 18.02,
+            "B": 14.84,
+            "C": 89.27,
+            "D": 50.93,
+            "A1_silhouette": 18.02,
+            "A2_color": 14.84,
+            "A3_detail": 27.12,
+            "C1_coherence": 82.5,
+            "C2_vitality": 89.27,
+            "D1_contour": 50.93,
+            "C3_consistency": 100.0,
+            "B1_smoothness": 33.42,
+            "B2_holes": 100.0,
+            "B3_fragmentation": 42.64,
+            "D2_material": 100.0,
+            "overall": 57.02
+          },
+          "7": {
+            "A": 15.75,
+            "B": 54.5,
+            "C": 99.37,
+            "D": 36.66,
+            "A1_silhouette": 15.75,
+            "A2_color": 54.5,
+            "A3_detail": 22.57,
+            "C1_coherence": 75.09,
+            "C2_vitality": 99.37,
+            "D1_contour": 36.66,
+            "C3_consistency": 100.0,
+            "B1_smoothness": 28.58,
+            "B2_holes": 100.0,
+            "B3_fragmentation": 41.24,
+            "D2_material": 100.0,
+            "overall": 58.21
+          }
+        },
+        "per_dimension": {
+          "A1_silhouette": 16.89,
+          "A2_color": 34.67,
+          "A3_detail": 24.85,
+          "B1_smoothness": 31.0,
+          "B2_holes": 100.0,
+          "B3_fragmentation": 41.94,
+          "C1_coherence": 78.79,
+          "C2_vitality": 94.32,
+          "C3_consistency": 100.0,
+          "D1_contour": 43.79,
+          "D2_material": 100.0
+        }
+      },
+      "seed": 5418,
+      "status": "evaluated"
+    },
+    {
+      "id": "v5g31-001",
+      "generation": 31,
+      "origin": "cross(v5g30-00,v5g28-00)",
+      "params": {
+        "tex_slat_guidance_strength": 14.5,
+        "tex_slat_guidance_rescale": 0.95,
+        "tex_slat_sampling_steps": 16,
+        "tex_slat_rescale_t": 3.5,
+        "shape_slat_guidance_strength": 10.0,
+        "shape_slat_guidance_rescale": 0.5,
+        "shape_slat_sampling_steps": 18,
+        "ss_guidance_strength": 10.0,
+        "ss_guidance_rescale": 0.9
+      },
+      "fitness": {
+        "overall": 55.99,
+        "per_example": {
+          "4": {
+            "A": 12.19,
+            "B": 15.52,
+            "C": 91.0,
+            "D": 40.23,
+            "A1_silhouette": 12.19,
+            "A2_color": 15.52,
+            "A3_detail": 23.99,
+            "C1_coherence": 77.27,
+            "C2_vitality": 91.0,
+            "D1_contour": 40.23,
+            "C3_consistency": 100.0,
+            "B1_smoothness": 38.3,
+            "B2_holes": 100.0,
+            "B3_fragmentation": 34.15,
+            "D2_material": 100.0,
+            "overall": 54.17
+          },
+          "7": {
+            "A": 15.6,
+            "B": 51.19,
+            "C": 99.47,
+            "D": 36.2,
+            "A1_silhouette": 15.6,
+            "A2_color": 51.19,
+            "A3_detail": 22.54,
+            "C1_coherence": 74.59,
+            "C2_vitality": 99.47,
+            "D1_contour": 36.2,
+            "C3_consistency": 100.0,
+            "B1_smoothness": 29.13,
+            "B2_holes": 100.0,
+            "B3_fragmentation": 41.39,
+            "D2_material": 100.0,
+            "overall": 57.82
+          }
+        },
+        "per_dimension": {
+          "A1_silhouette": 13.9,
+          "A2_color": 33.36,
+          "A3_detail": 23.26,
+          "B1_smoothness": 33.71,
+          "B2_holes": 100.0,
+          "B3_fragmentation": 37.77,
+          "C1_coherence": 75.93,
+          "C2_vitality": 95.24,
+          "C3_consistency": 100.0,
+          "D1_contour": 38.22,
+          "D2_material": 100.0
+        }
+      },
+      "seed": 3484,
+      "status": "evaluated"
+    },
+    {
+      "id": "v5g31-002",
+      "generation": 31,
+      "origin": "cross(v5g28-00,v5g30-00)",
+      "params": {
+        "tex_slat_guidance_strength": 12.5,
+        "tex_slat_guidance_rescale": 0.95,
+        "tex_slat_sampling_steps": 16,
+        "tex_slat_rescale_t": 3.5,
+        "shape_slat_guidance_strength": 10.0,
+        "shape_slat_guidance_rescale": 0.5,
+        "shape_slat_sampling_steps": 18,
+        "ss_guidance_strength": 10.0,
+        "ss_guidance_rescale": 0.8
+      },
+      "fitness": {
+        "overall": 54.4,
+        "per_example": {
+          "4": {
+            "A": 16.63,
+            "B": 16.13,
+            "C": 86.73,
+            "D": 47.79,
+            "A1_silhouette": 16.63,
+            "A2_color": 16.13,
+            "A3_detail": 25.36,
+            "C1_coherence": 78.91,
+            "C2_vitality": 86.73,
+            "D1_contour": 47.79,
+            "C3_consistency": 100.0,
+            "B1_smoothness": 39.91,
+            "B2_holes": 100.0,
+            "B3_fragmentation": 27.28,
+            "D2_material": 100.0,
+            "overall": 55.06
+          },
+          "7": {
+            "A": 15.61,
+            "B": 53.0,
+            "C": 78.68,
+            "D": 36.14,
+            "A1_silhouette": 15.61,
+            "A2_color": 53.0,
+            "A3_detail": 22.52,
+            "C1_coherence": 76.82,
+            "C2_vitality": 78.68,
+            "D1_contour": 36.14,
+            "C3_consistency": 100.0,
+            "B1_smoothness": 35.4,
+            "B2_holes": 88.05,
+            "B3_fragmentation": 15.0,
+            "D2_material": 100.0,
+            "overall": 53.73
+          }
+        },
+        "per_dimension": {
+          "A1_silhouette": 16.12,
+          "A2_color": 34.56,
+          "A3_detail": 23.94,
+          "B1_smoothness": 37.66,
+          "B2_holes": 94.03,
+          "B3_fragmentation": 21.14,
+          "C1_coherence": 77.86,
+          "C2_vitality": 82.7,
+          "C3_consistency": 100.0,
+          "D1_contour": 41.96,
+          "D2_material": 100.0
+        }
+      },
+      "seed": 6349,
+      "status": "evaluated"
+    },
+    {
+      "id": "v5g31-003",
+      "generation": 31,
+      "origin": "cross(v5g28-00,v5g30-00)",
+      "params": {
+        "tex_slat_guidance_strength": 12.5,
+        "tex_slat_guidance_rescale": 0.95,
+        "tex_slat_sampling_steps": 16,
+        "tex_slat_rescale_t": 3.5,
+        "shape_slat_guidance_strength": 10.0,
+        "shape_slat_guidance_rescale": 0.6,
+        "shape_slat_sampling_steps": 18,
+        "ss_guidance_strength": 10.0,
+        "ss_guidance_rescale": 0.85
+      },
+      "fitness": {
+        "overall": 56.9,
+        "per_example": {
+          "4": {
+            "A": 18.59,
+            "B": 13.91,
+            "C": 95.23,
+            "D": 50.69,
+            "A1_silhouette": 18.59,
+            "A2_color": 13.91,
+            "A3_detail": 27.23,
+            "C1_coherence": 82.09,
+            "C2_vitality": 95.23,
+            "D1_contour": 50.69,
+            "C3_consistency": 100.0,
+            "B1_smoothness": 32.69,
+            "B2_holes": 100.0,
+            "B3_fragmentation": 21.09,
+            "D2_material": 100.0,
+            "overall": 55.73
+          },
+          "7": {
+            "A": 15.71,
+            "B": 55.07,
+            "C": 99.58,
+            "D": 37.36,
+            "A1_silhouette": 15.71,
+            "A2_color": 55.07,
+            "A3_detail": 22.63,
+            "C1_coherence": 76.32,
+            "C2_vitality": 99.58,
+            "D1_contour": 37.36,
+            "C3_consistency": 100.0,
+            "B1_smoothness": 30.78,
+            "B2_holes": 100.0,
+            "B3_fragmentation": 33.33,
+            "D2_material": 100.0,
+            "overall": 58.07
+          }
+        },
+        "per_dimension": {
+          "A1_silhouette": 17.15,
+          "A2_color": 34.49,
+          "A3_detail": 24.93,
+          "B1_smoothness": 31.73,
+          "B2_holes": 100.0,
+          "B3_fragmentation": 27.21,
+          "C1_coherence": 79.2,
+          "C2_vitality": 97.4,
+          "C3_consistency": 100.0,
+          "D1_contour": 44.02,
+          "D2_material": 100.0
+        }
+      },
+      "seed": 4316,
+      "status": "evaluated"
+    },
+    {
+      "id": "v5g31-004",
+      "generation": 31,
+      "origin": "mut(v5g28-00)",
+      "params": {
+        "tex_slat_guidance_strength": 12.5,
+        "tex_slat_guidance_rescale": 0.95,
+        "tex_slat_sampling_steps": 14,
+        "tex_slat_rescale_t": 3.5,
+        "shape_slat_guidance_strength": 10.0,
+        "shape_slat_guidance_rescale": 0.5,
+        "shape_slat_sampling_steps": 18,
+        "ss_guidance_strength": 10.0,
+        "ss_guidance_rescale": 0.8
+      },
+      "fitness": {
+        "overall": 55.459999084472656,
+        "per_example": {
+          "4": {
+            "A": 12.54,
+            "B": 18.12,
+            "C": 89.56,
+            "D": 40.18,
+            "A1_silhouette": 12.54,
+            "A2_color": 18.12,
+            "A3_detail": 24.92,
+            "C1_coherence": 79.54,
+            "C2_vitality": 89.56,
+            "D1_contour": 40.18,
+            "B1_smoothness": 36.83,
+            "B2_holes": 100.0,
+            "B3_fragmentation": 30.71,
+            "D2_material": 100.0
+          },
+          "7": {
+            "A": 15.83,
+            "B": 50.89,
+            "C": 92.87,
+            "D": 36.31,
+            "A1_silhouette": 15.83,
+            "A2_color": 50.89,
+            "A3_detail": 22.7,
+            "C1_coherence": 76.42,
+            "C2_vitality": 92.87,
+            "D1_contour": 36.31,
+            "C3_consistency": 100.0,
+            "B1_smoothness": 29.59,
+            "B2_holes": 100.0,
+            "B3_fragmentation": 35.55,
+            "D2_material": 100.0,
+            "overall": 56.97
+          }
+        },
+        "per_dimension": {
+          "A1_silhouette": 14.18,
+          "A2_color": 34.51,
+          "A3_detail": 23.81,
+          "B1_smoothness": 33.21,
+          "B2_holes": 100.0,
+          "B3_fragmentation": 33.13,
+          "C1_coherence": 77.98,
+          "C2_vitality": 91.21,
+          "C3_consistency": 96.72000122070312,
+          "D1_contour": 38.24,
+          "D2_material": 100.0
+        }
+      },
+      "seed": 2867,
+      "status": "evaluated"
+    },
+    {
+      "id": "v5g31-005",
+      "generation": 31,
+      "origin": "mut(v5g28-00)",
+      "params": {
+        "tex_slat_guidance_strength": 12.5,
+        "tex_slat_guidance_rescale": 1.0,
+        "tex_slat_sampling_steps": 16,
+        "tex_slat_rescale_t": 3.5,
+        "shape_slat_guidance_strength": 10.0,
+        "shape_slat_guidance_rescale": 0.5,
+        "shape_slat_sampling_steps": 18,
+        "ss_guidance_strength": 10.0,
+        "ss_guidance_rescale": 0.8
+      },
+      "fitness": {
+        "overall": 55.790000915527344,
+        "per_example": {
+          "4": {
+            "A": 11.96,
+            "B": 15.74,
+            "C": 89.4,
+            "D": 37.33,
+            "A1_silhouette": 11.96,
+            "A2_color": 15.74,
+            "A3_detail": 23.9,
+            "C1_coherence": 80.99,
+            "C2_vitality": 89.4,
+            "D1_contour": 37.33,
+            "B1_smoothness": 37.96,
+            "B2_holes": 100.0,
+            "B3_fragmentation": 32.42,
+            "D2_material": 100.0
+          },
+          "7": {
+            "A": 15.16,
+            "B": 48.47,
+            "C": 99.74,
+            "D": 36.19,
+            "A1_silhouette": 15.16,
+            "A2_color": 48.47,
+            "A3_detail": 22.97,
+            "C1_coherence": 79.73,
+            "C2_vitality": 99.74,
+            "D1_contour": 36.19,
+            "C3_consistency": 100.0,
+            "B1_smoothness": 30.17,
+            "B2_holes": 100.0,
+            "B3_fragmentation": 35.74,
+            "D2_material": 100.0,
+            "overall": 57.82
+          }
+        },
+        "per_dimension": {
+          "A1_silhouette": 13.56,
+          "A2_color": 32.1,
+          "A3_detail": 23.44,
+          "B1_smoothness": 34.06,
+          "B2_holes": 100.0,
+          "B3_fragmentation": 34.08,
+          "C1_coherence": 80.36,
+          "C2_vitality": 94.57,
+          "C3_consistency": 98.4000015258789,
+          "D1_contour": 36.76,
+          "D2_material": 100.0
+        }
+      },
+      "seed": 7384,
+      "status": "evaluated"
+    }
+  ]
+}

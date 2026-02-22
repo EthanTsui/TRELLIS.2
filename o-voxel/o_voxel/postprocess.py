@@ -124,6 +124,9 @@ def to_glb(
     grey_recovery_rounds: int = 2,
     grey_recovery_sigma: float = 25.0,
     sharpen_texture: bool = False,
+    enable_mesh_smooth: bool = True,
+    mesh_smooth_iterations: int = 3,
+    mesh_smooth_lamb: float = 0.5,
     verbose: bool = False,
     use_tqdm: bool = False,
 ):
@@ -306,6 +309,26 @@ def to_glb(
     if verbose:
         print("Done")
 
+    # --- Taubin Mesh Smoothing ---
+    # Reduces voxel staircase artifacts from marching cubes without shrinking.
+    # Applied after simplification/cleanup, before UV unwrapping.
+    if enable_mesh_smooth and mesh_smooth_iterations > 0:
+        if verbose:
+            print(f"Taubin smoothing ({mesh_smooth_iterations} iters, lambda={mesh_smooth_lamb})...")
+        verts_np, faces_np = mesh.read()
+        verts_np = verts_np.cpu().numpy()
+        faces_np = faces_np.cpu().numpy()
+        tm = trimesh.Trimesh(vertices=verts_np, faces=faces_np, process=False)
+        trimesh.smoothing.filter_taubin(
+            tm,
+            lamb=mesh_smooth_lamb,
+            nu=-mesh_smooth_lamb - 0.01,  # slightly stronger shrink-back
+            iterations=mesh_smooth_iterations,
+        )
+        smoothed_verts = torch.tensor(tm.vertices, dtype=torch.float32, device=vertices.device)
+        mesh.init(smoothed_verts, torch.tensor(tm.faces, dtype=torch.int64, device=faces.device))
+        if verbose:
+            print(f"After smoothing: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
 
     # --- UV Parameterization ---
     if use_tqdm:
