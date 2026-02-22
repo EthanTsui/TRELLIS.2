@@ -1153,11 +1153,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                     meshes = result
 
                 mesh = meshes[0]
-                score_dict = quality_verifier.score(mesh, ref_image)
+                score_dict = quality_verifier.score(mesh, ref_image, use_dreamsim=True)
                 all_scores.append(score_dict)
+                ds_str = f", dreamsim={score_dict['dreamsim']:.3f}" if 'dreamsim' in score_dict else ""
                 print(f"  Candidate {i+1}: total={score_dict['total']:.3f} "
                       f"(lpips={score_dict['lpips']:.3f}, geo={score_dict['geometric']:.3f}, "
-                      f"color={score_dict['color_richness']:.3f})")
+                      f"color={score_dict['color_richness']:.3f}{ds_str})")
 
                 if score_dict['total'] > best_score:
                     old_result = best_result
