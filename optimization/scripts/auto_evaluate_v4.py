@@ -171,14 +171,18 @@ class QualityEvaluatorV4:
             all_alphas=alpha_masks)
 
         # A2. Color Distribution (best-matching view)
-        if len(base_colors) > 1:
+        # Use shaded (PBR-lit) renders if available — fairer comparison
+        # since input photos also have lighting baked in.
+        # Falls back to base_color if shaded not available.
+        a2_views = channels.get('shaded', base_colors)
+        if len(a2_views) > 1:
             a2_scores = [self._color_distribution_match(
-                bc, am, reference_rgba)
-                for bc, am in zip(base_colors, alpha_masks)]
+                sv, am, reference_rgba)
+                for sv, am in zip(a2_views, alpha_masks)]
             scores['A2_color_dist'] = max(a2_scores)
         else:
             scores['A2_color_dist'] = self._color_distribution_match(
-                base_colors[0], alpha_masks[0], reference_rgba)
+                a2_views[0], alpha_masks[0], reference_rgba)
 
         # B1. Mesh Integrity (from GLB)
         scores['B1_mesh_integrity'] = self._mesh_integrity(glb_mesh)
@@ -862,21 +866,30 @@ def render_evaluation_views(mesh, envmap, nviews=8, resolution=512):
     Render all channels needed for V4 evaluation.
     Uses canonical camera: r=2, fov=40 (same as render_video),
     NOT r=10, fov=8 (snapshot quasi-ortho).
+
+    Multi-pitch sampling: renders at 3 elevation bands (low/mid/high)
+    to better match diverse input image viewing angles.
+    Total views: nviews * 3 pitches (default 24 views, ~1.5s render).
     """
     from trellis2.utils import render_utils
 
-    yaw = np.linspace(0, 2 * np.pi, nviews, endpoint=False).tolist()
-    pitch = [0.25] * nviews  # ~14 degrees elevation
-    r = [2.0] * nviews
-    fov = [40.0] * nviews
+    pitches = [0.15, 0.30, 0.50]  # ~8.6°, ~17.2°, ~28.6° elevation
+    all_yaw, all_pitch, all_r, all_fov = [], [], [], []
+    for p in pitches:
+        yaws = np.linspace(0, 2 * np.pi, nviews, endpoint=False).tolist()
+        all_yaw.extend(yaws)
+        all_pitch.extend([p] * nviews)
+        all_r.extend([2.0] * nviews)
+        all_fov.extend([40.0] * nviews)
 
     extr, intr = render_utils.yaw_pitch_r_fov_to_extrinsics_intrinsics(
-        yaw, pitch, r, fov)
+        all_yaw, all_pitch, all_r, all_fov)
 
     result = render_utils.render_frames(
         mesh, extr, intr,
         options={'resolution': resolution, 'bg_color': (0, 0, 0)},
         envmap=envmap,
+        verbose=False,
     )
 
     return {

@@ -302,7 +302,7 @@ def to_glb(
         # Step 2: Clean up topology (duplicates, non-manifolds, isolated parts)
         mesh.remove_duplicate_faces()
         mesh.repair_non_manifold_edges()
-        mesh.remove_small_connected_components(1e-5)
+        mesh.remove_small_connected_components(1e-3)
         mesh.fill_holes(max_hole_perimeter=3e-2)
         if verbose:
             print(f"After initial cleanup: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
@@ -315,7 +315,7 @@ def to_glb(
         # Step 4: Final Cleanup loop
         mesh.remove_duplicate_faces()
         mesh.repair_non_manifold_edges()
-        mesh.remove_small_connected_components(1e-5)
+        mesh.remove_small_connected_components(1e-3)
         mesh.fill_holes(max_hole_perimeter=3e-2)
         if verbose:
             print(f"After final cleanup: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
@@ -351,7 +351,7 @@ def to_glb(
         # Cleanup after remesh + simplify (fill holes, repair topology)
         mesh.remove_duplicate_faces()
         mesh.repair_non_manifold_edges()
-        mesh.remove_small_connected_components(1e-5)
+        mesh.remove_small_connected_components(1e-3)
         mesh.fill_holes(max_hole_perimeter=5e-2)
         mesh.unify_face_orientations()
         if verbose:
@@ -382,6 +382,55 @@ def to_glb(
         mesh.init(smoothed_verts, torch.tensor(tm.faces, dtype=torch.int32, device=faces.device))
         if verbose:
             print(f"After smoothing: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
+
+    # --- Fragment Cleanup (remove tiny disconnected patches) ---
+    # FDG meshing + simplification can leave thousands of micro-fragments.
+    # Remove components with fewer than min_faces to reduce GLB file size
+    # and improve commercial mesh quality.
+    min_fragment_faces = 50
+    try:
+        verts_fc, faces_fc = mesh.read()
+        verts_np_fc = verts_fc.cpu().numpy()
+        faces_np_fc = faces_fc.cpu().numpy().astype(np.int32)
+        nf = len(faces_np_fc)
+        if nf > 100:
+            from scipy import sparse
+            v0, v1, v2 = faces_np_fc[:, 0], faces_np_fc[:, 1], faces_np_fc[:, 2]
+            rows = np.concatenate([v0, v1, v2, v1, v2, v0])
+            cols = np.concatenate([v1, v2, v0, v0, v1, v2])
+            nv = len(verts_np_fc)
+            graph = sparse.coo_matrix(
+                (np.ones(len(rows), dtype=np.float32), (rows, cols)),
+                shape=(nv, nv)
+            ).tocsr()
+            n_comp, labels = sparse.csgraph.connected_components(graph, directed=False)
+            if n_comp > 1:
+                # Count faces per component (using label of first vertex of each face)
+                face_labels = labels[faces_np_fc[:, 0]]
+                comp_ids, comp_face_counts = np.unique(face_labels, return_counts=True)
+                keep_comps = set(comp_ids[comp_face_counts >= min_fragment_faces])
+                if len(keep_comps) < n_comp:
+                    keep_mask = np.array([face_labels[i] in keep_comps for i in range(nf)])
+                    removed = nf - keep_mask.sum()
+                    if removed > 0 and keep_mask.sum() > 100:
+                        # Rebuild mesh with only kept faces
+                        kept_faces = faces_np_fc[keep_mask]
+                        # Remap vertex indices
+                        used_verts = np.unique(kept_faces)
+                        remap = np.full(nv, -1, dtype=np.int32)
+                        remap[used_verts] = np.arange(len(used_verts), dtype=np.int32)
+                        new_faces = remap[kept_faces]
+                        new_verts = verts_np_fc[used_verts]
+                        mesh.init(
+                            torch.tensor(new_verts, dtype=torch.float32, device=vertices.device),
+                            torch.tensor(new_faces, dtype=torch.int32, device=faces.device)
+                        )
+                        if verbose:
+                            print(f"Fragment cleanup: removed {n_comp - len(keep_comps)} components "
+                                  f"({removed} faces), kept {len(keep_comps)} components")
+    except Exception as e:
+        if verbose:
+            print(f"Fragment cleanup skipped: {e}")
 
     # --- UV Parameterization ---
     if use_tqdm:
