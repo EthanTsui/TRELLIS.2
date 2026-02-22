@@ -763,14 +763,14 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 with gr.Row():
                     shape_slat_guidance_strength = gr.Slider(1.0, 15.0, label="Guidance Strength", value=10.0, step=0.1)
                     shape_slat_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=0.5, step=0.01)
-                    shape_slat_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=12, step=1)
+                    shape_slat_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=18, step=1)
                     shape_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=3.0, step=0.1)
                 gr.Markdown("Stage 3: Material Generation")
                 with gr.Row():
-                    tex_slat_guidance_strength = gr.Slider(1.0, 15.0, label="Guidance Strength", value=12.0, step=0.1)
-                    tex_slat_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=1.0, step=0.01)
+                    tex_slat_guidance_strength = gr.Slider(1.0, 15.0, label="Guidance Strength", value=12.5, step=0.1)
+                    tex_slat_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=0.95, step=0.01)
                     tex_slat_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=16, step=1)
-                    tex_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=4.0, step=0.1)
+                    tex_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=3.5, step=0.1)
                     tex_slat_cfg_mp_strength = gr.Slider(0.0, 0.5, label="CFG-MP Strength", value=0.15, step=0.01)
                     tex_slat_heun_steps = gr.Slider(0, 8, label="Heun Steps (final)", value=4, step=1)
                 multistep = gr.Checkbox(label="AB2 Multistep (free 2nd-order accuracy)", value=True)
