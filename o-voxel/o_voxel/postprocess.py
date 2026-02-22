@@ -326,7 +326,7 @@ def to_glb(
             iterations=mesh_smooth_iterations,
         )
         smoothed_verts = torch.tensor(tm.vertices, dtype=torch.float32, device=vertices.device)
-        mesh.init(smoothed_verts, torch.tensor(tm.faces, dtype=torch.int64, device=faces.device))
+        mesh.init(smoothed_verts, torch.tensor(tm.faces, dtype=torch.int32, device=faces.device))
         if verbose:
             print(f"After smoothing: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
 
