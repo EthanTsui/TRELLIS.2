@@ -10,6 +10,7 @@ class ClassifierFreeGuidanceSamplerMixin:
     def _inference_model(self, model, x_t, t, cond, neg_cond, guidance_strength,
                          guidance_rescale=0.0, cfg_mode='standard', apg_alpha=0.3,
                          fdg_sigma=1.0, fdg_lambda_low=0.6, fdg_lambda_high=1.3,
+                         fdg_time_schedule='fixed', guidance_interval=None,
                          **kwargs):
         if guidance_strength == 1:
             pred = super()._inference_model(model, x_t, t, cond, **kwargs)
@@ -25,7 +26,9 @@ class ClassifierFreeGuidanceSamplerMixin:
                                           cfg_mode=cfg_mode, apg_alpha=apg_alpha,
                                           fdg_sigma=fdg_sigma,
                                           fdg_lambda_low=fdg_lambda_low,
-                                          fdg_lambda_high=fdg_lambda_high)
+                                          fdg_lambda_high=fdg_lambda_high,
+                                          t=t, fdg_time_schedule=fdg_time_schedule,
+                                          guidance_interval=guidance_interval)
 
             # CFG rescale
             if guidance_rescale > 0:

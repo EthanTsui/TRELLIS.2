@@ -173,6 +173,14 @@ class FlowEulerSampler(Sampler):
         heun_steps = kwargs.pop('heun_steps', 0)
         # AB2: Adams-Bashforth 2nd order multistep (free accuracy, no extra model calls)
         multistep = kwargs.pop('multistep', False)
+        # Rectified-CFG++ (Saini et al., arXiv 2510.07631, NeurIPS 2025)
+        # 3-NFE predictor-corrector: conditional predictor → evaluate cond+uncond
+        # at predicted point → interpolative correction. Keeps trajectories on the
+        # data manifold. When active, bypasses CFG mixin (Heun/AB2/CFG-MP disabled).
+        rectified_cfgpp = kwargs.pop('rectified_cfgpp', False)
+        rcfgpp_lambda_max = kwargs.pop('rcfgpp_lambda_max', 4.5)
+        rcfgpp_gamma = kwargs.pop('rcfgpp_gamma', 0.0)
+        rcfgpp_sigma_noise = kwargs.pop('rcfgpp_sigma_noise', 0.005)
         # Timestep schedule: 'uniform' (default), 'edm', 'logsnr', 'quadratic'
         schedule = kwargs.pop('schedule', 'uniform')
         schedule_rho = kwargs.pop('schedule_rho', 7.0)
@@ -223,39 +231,95 @@ class FlowEulerSampler(Sampler):
                 ret.pred_x_t.append(sample)
                 ret.pred_x_0.append(sample)
                 continue
-            out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
             dt = t - t_prev
-            # Heun correction: 2nd-order method for final steps where detail forms
-            use_heun = heun_steps > 0 and step_idx >= steps - heun_steps and t_prev > 0
-            if use_heun:
-                v1 = (sample - out.pred_x_prev) / dt
-                _, _, v2 = self._get_model_prediction(model, out.pred_x_prev, t_prev, cond, **kwargs)
-                out.pred_x_prev = sample - dt / 2 * (v1 + v2)
-            elif multistep and prev_v is not None and prev_dt is not None:
-                # AB2: variable step-size Adams-Bashforth 2nd order
-                v_curr = (sample - out.pred_x_prev) / dt
-                r = dt / (2 * prev_dt)
-                out.pred_x_prev = sample - dt * ((1 + r) * v_curr - r * prev_v)
-                prev_v = v_curr
-                prev_dt = dt
-            elif multistep:
-                # First step: store velocity for AB2
-                prev_v = (sample - out.pred_x_prev) / dt
-                prev_dt = dt
-            if cfg_mp_strength > 0 and t_prev > 0:
-                # CFG-MP: project Euler step result back toward data manifold.
-                # Use conditional-only pred_x_0 (not CFG-boosted) for true manifold target.
-                cond_pred_v = getattr(self, '_last_cond_pred_v', None)
-                if cond_pred_v is not None:
-                    cond_x_0, _ = self._v_to_xstart_eps(sample, t, cond_pred_v)
+            # Check if Rectified-CFG++ should be used for this step
+            _cur_guidance = kwargs.get('guidance_strength', 1.0)
+            use_rcfgpp = (rectified_cfgpp and _cur_guidance is not None
+                          and _cur_guidance > 1.0 and step_idx >= zero_init_steps)
+
+            if use_rcfgpp:
+                # Rectified-CFG++: 3-NFE predictor-corrector (bypasses CFG mixin)
+                neg_cond_rc = kwargs.get('neg_cond', None)
+
+                # Alpha schedule: lambda_max * (1-t)^gamma
+                alpha_t = rcfgpp_lambda_max
+                if rcfgpp_gamma > 0:
+                    alpha_t = rcfgpp_lambda_max * (1.0 - t) ** rcfgpp_gamma
+
+                # Respect guidance interval
+                gi = kwargs.get('guidance_interval', None)
+                if gi is not None and (t < gi[0] or t > gi[1]):
+                    alpha_t = 0.0
+
+                # Phase 1: Conditional predictor (full Euler step)
+                v_cond = FlowEulerSampler._inference_model(
+                    self, model, sample, t, cond)
+                x_pred = sample - dt * v_cond
+
+                # Optional noise injection (disabled near t=0)
+                if rcfgpp_sigma_noise > 0 and t_prev > 0.1:
+                    if hasattr(x_pred, 'replace') and hasattr(x_pred, 'feats'):
+                        noise_eps = x_pred.replace(
+                            torch.randn_like(x_pred.feats))
+                    else:
+                        noise_eps = torch.randn_like(x_pred)
+                    x_pred = x_pred + rcfgpp_sigma_noise * noise_eps
+
+                # Phase 2: Evaluate cond + uncond at predicted point
+                v_cond_pred = FlowEulerSampler._inference_model(
+                    self, model, x_pred, t_prev, cond)
+                if neg_cond_rc is not None and alpha_t > 0:
+                    v_uncond_pred = FlowEulerSampler._inference_model(
+                        self, model, x_pred, t_prev, neg_cond_rc)
                 else:
-                    cond_x_0 = out.pred_x_0  # fallback to CFG pred_x_0
-                sigma_t = self.sigma_min + (1 - self.sigma_min) * t
-                sigma_t_prev = self.sigma_min + (1 - self.sigma_min) * t_prev
-                ratio = sigma_t_prev / sigma_t
-                coeff_x0 = (1 - t_prev) - (1 - t) * ratio
-                x_manifold = ratio * sample + coeff_x0 * cond_x_0
-                out.pred_x_prev = out.pred_x_prev + cfg_mp_strength * (x_manifold - out.pred_x_prev)
+                    v_uncond_pred = v_cond_pred
+
+                # Phase 3: Corrector — Eq. 8: v_guided = v_cond + α(v_c_pred - v_u_pred)
+                if hasattr(v_cond, 'feats'):
+                    corr = alpha_t * (v_cond_pred.feats - v_uncond_pred.feats)
+                    v_guided = v_cond.replace(v_cond.feats + corr)
+                else:
+                    v_guided = v_cond + alpha_t * (v_cond_pred - v_uncond_pred)
+
+                pred_x_prev = sample - dt * v_guided
+                pred_x_0, _ = self._v_to_xstart_eps(sample, t, v_guided)
+                out = edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
+                self._last_cond_pred_v = v_cond
+
+            else:
+                out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
+                # Heun correction: 2nd-order method for final steps
+                use_heun = (heun_steps > 0 and step_idx >= steps - heun_steps
+                            and t_prev > 0)
+                if use_heun:
+                    v1 = (sample - out.pred_x_prev) / dt
+                    _, _, v2 = self._get_model_prediction(
+                        model, out.pred_x_prev, t_prev, cond, **kwargs)
+                    out.pred_x_prev = sample - dt / 2 * (v1 + v2)
+                elif multistep and prev_v is not None and prev_dt is not None:
+                    # AB2: variable step-size Adams-Bashforth 2nd order
+                    v_curr = (sample - out.pred_x_prev) / dt
+                    r = dt / (2 * prev_dt)
+                    out.pred_x_prev = sample - dt * ((1 + r) * v_curr - r * prev_v)
+                    prev_v = v_curr
+                    prev_dt = dt
+                elif multistep:
+                    # First step: store velocity for AB2
+                    prev_v = (sample - out.pred_x_prev) / dt
+                    prev_dt = dt
+                if cfg_mp_strength > 0 and t_prev > 0:
+                    # CFG-MP: project toward data manifold using conditional pred_x_0
+                    cond_pred_v = getattr(self, '_last_cond_pred_v', None)
+                    if cond_pred_v is not None:
+                        cond_x_0, _ = self._v_to_xstart_eps(sample, t, cond_pred_v)
+                    else:
+                        cond_x_0 = out.pred_x_0
+                    sigma_t = self.sigma_min + (1 - self.sigma_min) * t
+                    sigma_t_prev = self.sigma_min + (1 - self.sigma_min) * t_prev
+                    ratio = sigma_t_prev / sigma_t
+                    coeff_x0 = (1 - t_prev) - (1 - t) * ratio
+                    x_manifold = ratio * sample + coeff_x0 * cond_x_0
+                    out.pred_x_prev = out.pred_x_prev + cfg_mp_strength * (x_manifold - out.pred_x_prev)
             # Stochastic SDE noise injection: adds diversity and can improve detail
             # Only inject noise at intermediate steps (not the final step to t≈0)
             _sde_alpha = float(sde_alpha) if sde_alpha else 0.0

@@ -5,6 +5,7 @@ Run AFTER Round 3 completes. Uses V4.1 evaluator (auto-loaded from live mount).
 
 Key untested techniques:
 - FDG: Frequency-Decoupled Guidance — separate high/low freq guidance weights
+- fdg_tv: Time-varying FDG — lambda ramps from neutral to target within guidance interval
 - tex_refine: Render-and-compare texture optimization via nvdiffrast
 - shape_gs_combined: Bell-curve guidance schedule for shape stage (A1 target)
 - bon_combos: BON4 + best guidance combos
@@ -18,6 +19,10 @@ BATCH = [
     # FDG at 1024: promising for texture detail (C3), completely untested
     # lambda_high > 1 boosts high-frequency detail, lambda_low < 1 suppresses low-freq saturation
     ('fdg', 3),               # 4 configs × 3 images
+
+    # FDG time-varying: lambda ramps from neutral at interval start to target at interval end
+    # Theory: avoid amplifying noise early, boost detail late (Stage-wise CFG Dynamics paper)
+    ('fdg_tv', 1),            # 4 configs × 1 image (quick validation after fdg results)
 
     # Texture refinement: render-and-compare optimization, targets A2/C1
     # Uses nvdiffrast differentiable rendering + chrominance L1 + proximity loss

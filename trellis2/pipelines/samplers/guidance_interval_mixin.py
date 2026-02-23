@@ -55,7 +55,8 @@ class GuidanceIntervalSamplerMixin:
                 else:
                     effective_strength = guidance_strength
                 return super()._inference_model(model, x_t, t, cond,
-                                                guidance_strength=effective_strength, **kwargs)
+                                                guidance_strength=effective_strength,
+                                                guidance_interval=guidance_interval, **kwargs)
             elif guidance_schedule == 'triangular':
                 # TV-CFG: symmetric triangle peaking at interval midpoint
                 interval_range = guidance_interval[1] - guidance_interval[0]
@@ -66,11 +67,13 @@ class GuidanceIntervalSamplerMixin:
                 else:
                     effective_strength = guidance_strength
                 return super()._inference_model(model, x_t, t, cond,
-                                                guidance_strength=effective_strength, **kwargs)
+                                                guidance_strength=effective_strength,
+                                                guidance_interval=guidance_interval, **kwargs)
             else:
                 # Binary: full guidance within interval
                 return super()._inference_model(model, x_t, t, cond,
-                                                guidance_strength=guidance_strength, **kwargs)
+                                                guidance_strength=guidance_strength,
+                                                guidance_interval=guidance_interval, **kwargs)
         else:
             return super()._inference_model(model, x_t, t, cond,
                                             guidance_strength=1, **kwargs)

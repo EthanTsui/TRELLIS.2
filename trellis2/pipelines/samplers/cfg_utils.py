@@ -112,9 +112,59 @@ def _sparse_gaussian_blur_3d(feats, coords, sigma):
     return blurred_feats
 
 
+def _fdg_effective_lambdas(fdg_lambda_low, fdg_lambda_high, t, fdg_time_schedule,
+                           guidance_interval=None):
+    """
+    Compute effective FDG lambdas based on timestep and schedule.
+
+    Ramps from neutral (1.0, 1.0) at high-noise to (fdg_lambda_low, fdg_lambda_high)
+    at low-noise. Supports interval-relative scheduling so the full ramp occurs
+    within the guidance interval (where FDG is active), not over absolute t.
+
+    Theory: HF content is noise-dominated at early steps, detail at late steps.
+    (Stage-wise CFG dynamics, E-CFG, CFG weight schedulers — 3 independent papers)
+
+    Args:
+        fdg_lambda_low: Target low-freq lambda at clean end.
+        fdg_lambda_high: Target high-freq lambda at clean end.
+        t: Current timestep in [0, 1]. None uses fixed lambdas.
+        fdg_time_schedule: 'fixed', 'linear', 'cosine', 'quadratic', or 'late_only'.
+        guidance_interval: (t_lo, t_hi) for interval-relative scheduling.
+            If provided, progress maps [t_hi, t_lo] → [0, 1] within the interval.
+
+    Returns:
+        (effective_lambda_low, effective_lambda_high)
+    """
+    if fdg_time_schedule == 'fixed' or t is None:
+        return fdg_lambda_low, fdg_lambda_high
+
+    # Interval-relative: map t within guidance interval to [0, 1] progress
+    if guidance_interval is not None:
+        t_lo, t_hi = guidance_interval
+        if t_hi <= t_lo:
+            return fdg_lambda_low, fdg_lambda_high
+        progress = max(0.0, min(1.0, (t_hi - t) / (t_hi - t_lo)))
+    else:
+        progress = 1.0 - t  # 0 at t=1 (noise), 1 at t=0 (data)
+
+    if fdg_time_schedule == 'cosine':
+        progress = 0.5 * (1 - math.cos(math.pi * progress))
+    elif fdg_time_schedule == 'quadratic':
+        progress = progress ** 2
+    elif fdg_time_schedule == 'late_only':
+        # Only activate in last 50% of the interval (safest option)
+        progress = max(0.0, (progress - 0.5) / 0.5)
+
+    eff_low = 1.0 + (fdg_lambda_low - 1.0) * progress
+    eff_high = 1.0 + (fdg_lambda_high - 1.0) * progress
+    return eff_low, eff_high
+
+
 def compute_cfg_prediction(pred_pos, pred_neg, guidance_strength,
                            cfg_mode='standard', apg_alpha=0.3,
-                           fdg_sigma=1.0, fdg_lambda_low=0.6, fdg_lambda_high=1.3):
+                           fdg_sigma=1.0, fdg_lambda_low=0.6, fdg_lambda_high=1.3,
+                           t=None, fdg_time_schedule='fixed',
+                           guidance_interval=None):
     """
     Compute classifier-free guided prediction using the specified mode.
 
@@ -127,6 +177,9 @@ def compute_cfg_prediction(pred_pos, pred_neg, guidance_strength,
         fdg_sigma: Gaussian blur sigma for FDG frequency decomposition.
         fdg_lambda_low: Low-frequency guidance weight for FDG.
         fdg_lambda_high: High-frequency guidance weight for FDG.
+        t: Current ODE timestep in [0, 1] (for time-varying FDG).
+        fdg_time_schedule: 'fixed' (default), 'linear', 'cosine', 'quadratic', 'late_only'.
+        guidance_interval: (t_lo, t_hi) for interval-relative FDG scheduling.
 
     Returns:
         Guided prediction (same type as inputs).
@@ -182,6 +235,10 @@ def compute_cfg_prediction(pred_pos, pred_neg, guidance_strength,
         #   delta_low = GaussianBlur(delta, sigma)
         #   delta_high = delta - delta_low
         #   pred = pred_neg + w * (lambda_low * delta_low + lambda_high * delta_high)
+        eff_low, eff_high = _fdg_effective_lambdas(
+            fdg_lambda_low, fdg_lambda_high, t, fdg_time_schedule,
+            guidance_interval
+        )
         is_sparse = hasattr(pred_pos, 'feats')
         if is_sparse:
             delta_feats = pred_pos.feats - pred_neg.feats
@@ -190,7 +247,7 @@ def compute_cfg_prediction(pred_pos, pred_neg, guidance_strength,
             )
             delta_high = delta_feats - delta_low
             guided_feats = pred_neg.feats + guidance_strength * (
-                fdg_lambda_low * delta_low + fdg_lambda_high * delta_high
+                eff_low * delta_low + eff_high * delta_high
             )
             pred = pred_neg.replace(guided_feats)
         else:
@@ -198,7 +255,7 @@ def compute_cfg_prediction(pred_pos, pred_neg, guidance_strength,
             delta_low = _gaussian_blur_3d(delta, fdg_sigma)
             delta_high = delta - delta_low
             pred = pred_neg + guidance_strength * (
-                fdg_lambda_low * delta_low + fdg_lambda_high * delta_high
+                eff_low * delta_low + eff_high * delta_high
             )
 
     else:

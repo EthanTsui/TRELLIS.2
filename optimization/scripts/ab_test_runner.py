@@ -263,48 +263,46 @@ PRESETS = {
         'fdgs_s10':     {'tex_cfg_mode': 'fdg', 'tex_fdg_sigma': 1.0, 'tex_fdg_lambda_low': 0.5, 'tex_fdg_lambda_high': 1.5},
         'fdgs_s20':     {'tex_cfg_mode': 'fdg', 'tex_fdg_sigma': 2.0, 'tex_fdg_lambda_low': 0.5, 'tex_fdg_lambda_high': 1.5},
     },
-    # Decimation target: higher → more faces → more geometric detail
-    'decimation': {
-        'dec_500k':  {},  # baseline (500K)
-        'dec_800k':  {'decimation_target': 800000},
-        'dec_1200k': {'decimation_target': 1200000},
+    # FDG time-varying: lambda ramps from (1,1) at t=1 to (lambda_low, lambda_high) at t=0
+    # Tests whether gradual FDG avoids early-step artifacts while boosting late-step detail
+    'fdg_tv': {
+        'fdgtv_baseline': {},  # standard CFG (no FDG)
+        'fdgtv_fixed':    {'tex_cfg_mode': 'fdg', 'tex_fdg_lambda_low': 0.5, 'tex_fdg_lambda_high': 1.5},  # constant FDG
+        'fdgtv_linear':   {'tex_cfg_mode': 'fdg', 'tex_fdg_lambda_low': 0.5, 'tex_fdg_lambda_high': 1.5, 'tex_fdg_time_schedule': 'linear'},
+        'fdgtv_cosine':   {'tex_cfg_mode': 'fdg', 'tex_fdg_lambda_low': 0.5, 'tex_fdg_lambda_high': 1.5, 'tex_fdg_time_schedule': 'cosine'},
     },
-    # BON4 + best guidance configs: combine staged Best-of-N with best findings
-    # Standard BON4 gave 93.34. Beta(3,3) gave 92.66. Potentially additive.
+    # Decimation target: higher → more faces → more geometric detail
+    # Champion config uses 800K (matching app.py default)
+    'decimation': {
+        'dec_500k':  {'decimation_target': 500000},   # lower (old default)
+        'dec_800k':  {},                                # champion default (800K)
+        'dec_1200k': {'decimation_target': 1200000},   # higher
+    },
+    # BON4 + best guidance configs: combine staged Best-of-N with champion triangular
+    # Standard BON4 gave 93.34. Triangular gave 92.6. Potentially additive.
     'bon4_combined': {
-        'b4_baseline':  {'staged_bon': 4},  # staged BON4 alone
-        'b4_beta33':    {'staged_bon': 4,   # BON4 + bell-curve guidance
-                         'tex_guidance_schedule': 'beta',
-                         'tex_guidance_beta_a': 3.0,
-                         'tex_guidance_beta_b': 3.0},
+        'b4_baseline':  {'staged_bon': 4},  # staged BON4 alone (uses champion triangular)
+        'b4_fdg':       {'staged_bon': 4,   # BON4 + FDG for max detail
+                         'tex_cfg_mode': 'fdg', 'tex_fdg_sigma': 1.0,
+                         'tex_fdg_lambda_low': 0.5, 'tex_fdg_lambda_high': 1.5},
         'b4_narrow':    {'staged_bon': 4,   # BON4 + narrow interval
                          'tex_guidance_interval': (0.05, 0.85)},
     },
     # Shape guidance schedule for improving A1 silhouette
     # A1 is the largest weighted gap (81.4/100, weight 15)
     'shape_gs_combined': {
-        'sgc_baseline':    {},  # constant guidance all stages
-        'sgc_shape_bell':  {   # bell-curve for shape stage only
+        'sgc_baseline':      {},  # champion (tex=triangular, shape=constant)
+        'sgc_shape_tri':     {   # triangular for shape stage only
+            'shape_guidance_schedule': 'triangular',
+        },
+        'sgc_shape_bell':    {   # bell-curve beta(3,3) for shape stage only
             'shape_guidance_schedule': 'beta',
             'shape_guidance_beta_a': 3.0,
             'shape_guidance_beta_b': 3.0,
         },
-        'sgc_all_bell':    {   # bell-curve for ALL stages
-            'shape_guidance_schedule': 'beta',
-            'shape_guidance_beta_a': 3.0,
-            'shape_guidance_beta_b': 3.0,
-            'tex_guidance_schedule': 'beta',
-            'tex_guidance_beta_a': 3.0,
-            'tex_guidance_beta_b': 3.0,
-        },
-        'sgc_all_bell_bon4': {  # bell-curve ALL + BON4
+        'sgc_shape_tri_bon4': {  # triangular shape + BON4
             'staged_bon': 4,
-            'shape_guidance_schedule': 'beta',
-            'shape_guidance_beta_a': 3.0,
-            'shape_guidance_beta_b': 3.0,
-            'tex_guidance_schedule': 'beta',
-            'tex_guidance_beta_a': 3.0,
-            'tex_guidance_beta_b': 3.0,
+            'shape_guidance_schedule': 'triangular',
         },
     },
     # Texture refinement: test fixed refiner (no TV, proximity loss, lower iters/lr)
@@ -346,28 +344,29 @@ PRESETS = {
     # tri_narrow [0.05,0.9]: A2 +2.1, C1 +2.0, overall +0.6 (BEST for A2/C1)
     # beta(4,2) guidance: C3 +2.9, overall +0.5 (BEST for C3)
     # beta(3,3) guidance: A2 +0.6, C1 +1.3, overall +0.7 (BEST overall single change)
-    # split_sched: C3 +0.9, overall +0.2 (quad SS/shape, uniform tex)
-    # SDE: ±0 (confirmed zero effect)
+    # V4.1 findings: split_sched C3=86.0 (+5.0!), beta(4,2) C3=82.2 (+2.9), tri_narrow A2+2.1
+    # SDE: ±0 (confirmed zero effect across all 5 configs)
     'round3_best': {
         'r3_baseline':     {},  # champion baseline (1024)
-        'r3_b42_narrow':   {    # HYPOTHESIS: C3 + A2/C1 additive
-            'tex_guidance_schedule': 'beta',
-            'tex_guidance_beta_a': 4.0,
-            'tex_guidance_beta_b': 2.0,
-            'tex_guidance_interval': (0.05, 0.9),
-        },
-        'r3_b33_narrow':   {    # best overall schedule + best interval
-            'tex_guidance_schedule': 'beta',
-            'tex_guidance_beta_a': 3.0,
-            'tex_guidance_beta_b': 3.0,
-            'tex_guidance_interval': (0.05, 0.9),
-        },
-        'r3_kitchen_sink': {    # everything combined: schedule + interval + split + BON4
+        'r3_split_b42':    {    # BEST C3 combo: split_sched (+5.0) + beta42 (+2.9)
             'ss_schedule': 'quadratic', 'shape_schedule': 'quadratic',
             'tex_schedule': 'uniform',
             'tex_guidance_schedule': 'beta',
-            'tex_guidance_beta_a': 3.0,
-            'tex_guidance_beta_b': 3.0,
+            'tex_guidance_beta_a': 4.0,
+            'tex_guidance_beta_b': 2.0,
+        },
+        'r3_split_tri_n':  {    # C3 + A2/C1: split_sched + triangular + narrow
+            'ss_schedule': 'quadratic', 'shape_schedule': 'quadratic',
+            'tex_schedule': 'uniform',
+            'tex_guidance_schedule': 'triangular',
+            'tex_guidance_interval': (0.05, 0.9),
+        },
+        'r3_full_combo':   {    # everything: split + beta42 + narrow + BON4
+            'ss_schedule': 'quadratic', 'shape_schedule': 'quadratic',
+            'tex_schedule': 'uniform',
+            'tex_guidance_schedule': 'beta',
+            'tex_guidance_beta_a': 4.0,
+            'tex_guidance_beta_b': 2.0,
             'tex_guidance_interval': (0.05, 0.9),
             'staged_bon': 4,
         },

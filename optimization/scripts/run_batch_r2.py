@@ -13,8 +13,8 @@ BATCH = [
     # Tests: skip max_pool, use full decoder output
     ('cascade_64', 3),
 
-    # Round 3: best combos from all prior tests (4 configs × 3 images)
-    # Tests: split_sched+beta33, narrow+split, full_combo (split+beta+BON4)
+    # Round 3: best combos from V4.1 findings (4 configs × 3 images)
+    # Tests: split_b42 (C3 +5+3), split_tri_narrow (C3+A2), full_combo (+BON4)
     ('round3_best', 3),
 
     # 1536 resolution combos (4 configs × 3 images)

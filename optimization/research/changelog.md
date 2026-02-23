@@ -5,6 +5,42 @@ Uses genetic algorithm principles: keep good parameters, replace bad ones, conti
 
 ---
 
+## Survey v7: Breaking Through V4.1 ~93/100 Quality Ceiling (2026-02-23)
+
+### Scope
+Comprehensive literature survey targeting techniques to improve A1 (silhouette, Crown stuck at 74.7), A2 (color distribution, Crown 70-75), and C3 (detail richness, 75-88). Surveyed 14 new papers from 2024-2026, analyzed 8 actionable techniques across 3 tiers.
+
+### Key Findings
+
+1. **64^3 native cascade is the single highest-ROI test** -- already implemented (`ss_native_64=True`), expected +3-5 on A1 for complex objects. Theoretical Dice ceiling jumps from 80-90% to 90-95% for complex shapes.
+
+2. **Flow-Model Inference-Time Scaling (NeurIPS 2025)** is the most promising new technique. Converts ODE to SDE, enables particle-based quality search with Rollover Budget Forcing. 17% VQAScore improvement on 2D tasks. Directly applicable to TRELLIS.2's rectified flow. Requires 1-2 days to implement.
+
+3. **Elevate3D / HFS-SDEdit (SIGGRAPH 2025)** achieves SOTA texture+geometry refinement on arbitrary GLB meshes. Uses frequency-domain diffusion enhancement (preserves high-freq structure, regenerates low-freq quality). 25 min/model, MUSIQ +8% over baselines. Best path for A2+C3 breakthrough.
+
+4. **FDG (Frequency-Decoupled Guidance)** already implemented in cfg_utils.py, untested. Paper shows high-freq guidance boosts visual fidelity while low-freq governs structure. Could provide +2-4 on C3 with zero implementation effort.
+
+5. **Input-view color transfer** (Lab-space histogram matching with nvdiffrast visibility) would directly optimize A2 metric. Classical technique, 4-8h to implement.
+
+6. **Silhouette corrector upgrade** (Soft Dice loss + multi-res pyramid + relaxed constraints) could add +3-6 on A1 beyond current implementation. Currently uses suboptimal BCE loss and over-conservative regularization.
+
+### Test Priority Stack
+1. 64^3 cascade (0 effort, test) -- A1
+2. FDG guidance (0 effort, test) -- C3
+3. Staged Best-of-N (0 effort, test) -- A1
+4. Silhouette corrector upgrade (4-8h) -- A1
+5. Input-view color transfer (4-8h) -- A2
+6. Flow inference-time scaling/RBF (1-2 days) -- A1, A2, C3
+7. Elevate3D/HFS-SDEdit (2-3 days) -- A2, C3
+
+### Combined Ceiling Estimate
+Conservative: 93 -> 94-95. Optimistic (all Tier 1+2): 93 -> 95-97.
+
+### File
+`TRELLIS.2/optimization/research/v41_ceiling_breakthrough_survey_2026_02.md`
+
+---
+
 ## Experiment: grid_sample_3d Occupancy Normalization Verification (2026-02-23)
 
 ### Scope

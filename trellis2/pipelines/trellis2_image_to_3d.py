@@ -243,6 +243,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 guidance_interval=(0.0, 1.0), guidance_rescale=0.0,
                 cfg_mode='standard', apg_alpha=0.3,
                 fdg_sigma=1.0, fdg_lambda_low=0.6, fdg_lambda_high=1.3,
+                fdg_time_schedule='fixed',
                 **kwargs
             ):
                 # cond is (K, N, D) — run raw model once per view, then fuse
@@ -288,7 +289,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                     result = compute_cfg_prediction(pred, neg_pred, guidance_strength,
                                                     cfg_mode=cfg_mode, apg_alpha=apg_alpha,
                                                     fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low,
-                                                    fdg_lambda_high=fdg_lambda_high)
+                                                    fdg_lambda_high=fdg_lambda_high,
+                                                    t=t, fdg_time_schedule=fdg_time_schedule,
+                                                    guidance_interval=guidance_interval)
 
                     if guidance_rescale > 0:
                         # Use average of per-view x_0 stds instead of std of averaged
@@ -369,6 +372,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                           guidance_interval, guidance_rescale,
                           cfg_mode='standard', apg_alpha=0.3,
                           fdg_sigma=1.0, fdg_lambda_low=0.6, fdg_lambda_high=1.3,
+                          fdg_time_schedule='fixed',
                           **kwargs):
             """Run model prediction with CFG and optional rescaling."""
             pred = FlowEulerSampler._inference_model(
@@ -385,7 +389,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 result = compute_cfg_prediction(pred, neg_pred, guidance_strength,
                                                 cfg_mode=cfg_mode, apg_alpha=apg_alpha,
                                                 fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low,
-                                                fdg_lambda_high=fdg_lambda_high)
+                                                fdg_lambda_high=fdg_lambda_high,
+                                                t=t, fdg_time_schedule=fdg_time_schedule,
+                                                guidance_interval=guidance_interval)
                 if guidance_rescale > 0:
                     x_0_pos = sampler._pred_to_xstart(x_t, t, pred)
                     x_0_cfg = sampler._pred_to_xstart(x_t, t, result)
@@ -403,8 +409,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             guidance_interval=(0.0, 1.0), guidance_rescale=0.0,
             cfg_mode='standard', apg_alpha=0.3,
             fdg_sigma=1.0, fdg_lambda_low=0.6, fdg_lambda_high=1.3,
+            fdg_time_schedule='fixed',
             **kwargs
         ):
+            cfg_kw = dict(cfg_mode=cfg_mode, apg_alpha=apg_alpha,
+                          fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low,
+                          fdg_lambda_high=fdg_lambda_high, fdg_time_schedule=fdg_time_schedule)
             # Compute blend weight: 1.0 = pure concat, 0.0 = pure single
             if blend_width <= 0 or t >= t_high:
                 alpha = 1.0
@@ -418,34 +428,26 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 return _run_with_cfg(
                     model, x_t, t, concat_cond_tensor, concat_neg_tensor,
                     guidance_strength, guidance_interval, guidance_rescale,
-                    cfg_mode=cfg_mode, apg_alpha=apg_alpha,
-                    fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low, fdg_lambda_high=fdg_lambda_high,
-                    **kwargs
+                    **cfg_kw, **kwargs
                 )
             elif alpha <= 0.0:
                 # Pure single
                 return _run_with_cfg(
                     model, x_t, t, single_cond_tensor, single_neg_tensor,
                     guidance_strength, guidance_interval, guidance_rescale,
-                    cfg_mode=cfg_mode, apg_alpha=apg_alpha,
-                    fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low, fdg_lambda_high=fdg_lambda_high,
-                    **kwargs
+                    **cfg_kw, **kwargs
                 )
             else:
                 # Blend zone: run both and lerp predictions
                 pred_concat = _run_with_cfg(
                     model, x_t, t, concat_cond_tensor, concat_neg_tensor,
                     guidance_strength, guidance_interval, guidance_rescale,
-                    cfg_mode=cfg_mode, apg_alpha=apg_alpha,
-                    fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low, fdg_lambda_high=fdg_lambda_high,
-                    **kwargs
+                    **cfg_kw, **kwargs
                 )
                 pred_single = _run_with_cfg(
                     model, x_t, t, single_cond_tensor, single_neg_tensor,
                     guidance_strength, guidance_interval, guidance_rescale,
-                    cfg_mode=cfg_mode, apg_alpha=apg_alpha,
-                    fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low, fdg_lambda_high=fdg_lambda_high,
-                    **kwargs
+                    **cfg_kw, **kwargs
                 )
                 return alpha * pred_concat + (1 - alpha) * pred_single
 
@@ -593,6 +595,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             guidance_interval=(0.0, 1.0), guidance_rescale=0.0,
             cfg_mode='standard', apg_alpha=0.3,
             fdg_sigma=1.0, fdg_lambda_low=0.6, fdg_lambda_high=1.3,
+            fdg_time_schedule='fixed',
             **kwargs
         ):
             # Patch model blocks on first encounter
@@ -629,7 +632,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 result = compute_cfg_prediction(pred, neg_pred, guidance_strength,
                                                 cfg_mode=cfg_mode, apg_alpha=apg_alpha,
                                                 fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low,
-                                                fdg_lambda_high=fdg_lambda_high)
+                                                fdg_lambda_high=fdg_lambda_high,
+                                                t=t, fdg_time_schedule=fdg_time_schedule,
+                                                guidance_interval=guidance_interval)
 
                 if guidance_rescale > 0:
                     x_0_pos = sampler._pred_to_xstart(x_t, t, pred)
