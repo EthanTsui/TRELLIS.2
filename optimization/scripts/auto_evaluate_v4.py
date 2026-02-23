@@ -84,6 +84,11 @@ CHAMPION_CONFIG = {
     'tex_slat_sampling_steps': 16,
     'tex_slat_rescale_t': 4.0,
     'cfg_mp_strength': 0.0,
+    'heun_steps': 4,
+    'multistep': True,
+    'schedule': 'uniform',
+    'schedule_rho': 7.0,
+    'schedule_power': 2.0,
     'resolution': '1024',
     'seed': 42,
     'decimation_target': 500000,
@@ -199,13 +204,14 @@ class QualityEvaluatorV4:
         scores['C2_color_vitality'] = self._color_vitality(
             base_colors, alpha_masks)
 
-        # C3. Detail Richness (from base_color + optional texture map)
+        # C3. Detail Richness (texture + geometry + visual entropy)
         # Use only lower-pitch views (first half) — high elevation views
         # show less texture detail by nature which unfairly penalizes C3.
         # Views are ordered by pitch: [0.15, 0.30, 0.50, 0.65], 8 each.
         n_c3 = max(8, nviews // 2)
         scores['C3_detail_richness'] = self._detail_richness(
-            base_colors[:n_c3], alpha_masks[:n_c3], texture_map, tex_mask)
+            base_colors[:n_c3], alpha_masks[:n_c3], texture_map, tex_mask,
+            glb_mesh=glb_mesh)
 
         # D1. Material Plausibility (from metallic/roughness)
         scores['D1_material'] = self._material_plausibility(
@@ -698,25 +704,24 @@ class QualityEvaluatorV4:
     # ─── C3. Detail Richness ──────────────────────────────────────────────
 
     def _detail_richness(self, base_color_views, alpha_masks,
-                         texture_map=None, tex_mask=None):
+                         texture_map=None, tex_mask=None, glb_mesh=None):
         """
-        Measure intrinsic texture detail richness.
+        Measure total visual detail richness (texture + geometry).
 
-        Primary metric: UV texture-map Laplacian energy (80% weight).
-        - Resolution-independent (always 2048x2048 UV map)
-        - Directly measures texture detail in UV space
-        - Well-calibrated: range 5.9-11.3 across configs (30-100 score range)
+        Components:
+        - UV texture-map Laplacian (40%): texture detail in UV space
+        - Mesh dihedral angle std (40%): geometric surface complexity
+        - View-based color entropy (20%): tonal diversity
 
-        Secondary metric: View-based color entropy (20% weight).
-        - Measures color variety visible in rendered views
-        - Complements Laplacian by capturing overall richness
+        The texture + geometry split ensures resolution-agnostic scoring:
+        - High-poly mesh with smooth texture → high geo, low tex → balanced
+        - Low-poly mesh with detailed texture → low geo, high tex → balanced
 
-        Note: View-based gradient/FFT metrics were removed because:
-        - Gradient P75 always saturates at 100 on rendered views (dark pixels)
-        - FFT HF ratio at any threshold gives poor discrimination (30-37 range)
-        - Both metrics were uninformative for 3D base_color renders
+        Calibrated from 24 saved GLB files (2026-02-23):
+          DihedStd range: 9.62 (simple) → 18.41 (complex), threshold 8-16
+          TexLap range: 5.9 (v3) → 11.2 (1536 crown)
         """
-        # --- Primary: Texture-map Laplacian energy (80%) ---
+        # --- Component 1: Texture-map Laplacian energy (40%) ---
         tex_detail = 60.0  # default if no texture_map
         tex_lap_energy = -1.0
         if texture_map is not None and tex_mask is not None:
@@ -726,9 +731,8 @@ class QualityEvaluatorV4:
                 tex_lap = cv2.Laplacian(tex_gray.astype(np.float64), cv2.CV_64F)
                 tex_lap_energy = float(np.abs(tex_lap[mask_bool]).mean())
                 # Score mapping for UV texture maps (2048px typically):
-                # Calibrated from 7 GLB configs:
-                #   baseline_v3.2: 5.9,  v4_baseline: 5.9-8.0,
-                #   config_1024: 8.2,    config_1536: 9.2-11.3
+                # Calibrated from 9 GLB configs:
+                #   v3: 5.88, v4_baseline: 5.96-8.00, 1536: 8.85-11.24
                 if tex_lap_energy < 3:
                     tex_detail = 30.0
                 elif tex_lap_energy < 12:
@@ -736,7 +740,30 @@ class QualityEvaluatorV4:
                 else:
                     tex_detail = 100.0
 
-        # --- Secondary: View-based color entropy (20%) ---
+        # --- Component 2: Mesh geometry detail (40%) ---
+        # Dihedral angle std: measures surface complexity independent of texture.
+        # Higher std = more varied surface angles = more geometric detail.
+        # Uses GLB mesh (post-decimation), so is independent of raw mesh resolution.
+        geo_detail = 60.0  # default if no mesh
+        dihed_std = -1.0
+        if glb_mesh is not None:
+            try:
+                angles_deg = np.degrees(glb_mesh.face_adjacency_angles)
+                dihed_std = float(np.std(angles_deg))
+                # Score mapping calibrated from 24 saved GLBs (500K-800K faces):
+                #   cd3c309f: 9.62, T.png: 9.97, bestn_4: 10.7-12.7
+                #   smooth_off: 15.94, quality_upgrade: 18.41
+                #   Range 8-16 → 30-100
+                if dihed_std < 8:
+                    geo_detail = 30.0
+                elif dihed_std < 16:
+                    geo_detail = 30 + (dihed_std - 8) * 8.75  # 30→100
+                else:
+                    geo_detail = 100.0
+            except Exception:
+                pass
+
+        # --- Component 3: View-based color entropy (20%) ---
         # Shannon entropy of grayscale histogram — measures tonal diversity
         view_entropies = []
         for i in range(len(base_color_views)):
@@ -768,9 +795,10 @@ class QualityEvaluatorV4:
         else:
             entropy_score = 50.0
 
-        # Final composite: texture(80%) + entropy(20%)
-        result = 0.80 * tex_detail + 0.20 * entropy_score
+        # Final composite: texture(40%) + geometry(40%) + entropy(20%)
+        result = 0.40 * tex_detail + 0.40 * geo_detail + 0.20 * entropy_score
         print(f"    [C3 summary] tex_lap={tex_lap_energy:.1f}->{tex_detail:.1f} "
+              f"dihed_std={dihed_std:.1f}->{geo_detail:.1f} "
               f"entropy={median_entropy if view_entropies else -1:.2f}->{entropy_score:.1f} "
               f"final={result:.1f}",
               flush=True)
@@ -918,6 +946,19 @@ def get_envmap():
     return {'default': EnvMap(hdri)}
 
 
+def _get_eval_cameras(nviews=8):
+    """Return (yaws, pitches, rs, fovs) for canonical evaluation camera setup."""
+    pitches = [0.15, 0.30, 0.50, 0.65]
+    all_yaw, all_pitch, all_r, all_fov = [], [], [], []
+    for p in pitches:
+        yaws = np.linspace(0, 2 * np.pi, nviews, endpoint=False).tolist()
+        all_yaw.extend(yaws)
+        all_pitch.extend([p] * nviews)
+        all_r.extend([2.0] * nviews)
+        all_fov.extend([40.0] * nviews)
+    return all_yaw, all_pitch, all_r, all_fov
+
+
 def render_evaluation_views(mesh, envmap, nviews=8, resolution=512):
     """
     Render all channels needed for V4 evaluation.
@@ -930,14 +971,7 @@ def render_evaluation_views(mesh, envmap, nviews=8, resolution=512):
     """
     from trellis2.utils import render_utils
 
-    pitches = [0.15, 0.30, 0.50, 0.65]  # ~8.6°, ~17.2°, ~28.6°, ~37.3° elevation
-    all_yaw, all_pitch, all_r, all_fov = [], [], [], []
-    for p in pitches:
-        yaws = np.linspace(0, 2 * np.pi, nviews, endpoint=False).tolist()
-        all_yaw.extend(yaws)
-        all_pitch.extend([p] * nviews)
-        all_r.extend([2.0] * nviews)
-        all_fov.extend([40.0] * nviews)
+    all_yaw, all_pitch, all_r, all_fov = _get_eval_cameras(nviews)
 
     extr, intr = render_utils.yaw_pitch_r_fov_to_extrinsics_intrinsics(
         all_yaw, all_pitch, all_r, all_fov)
@@ -959,6 +993,68 @@ def render_evaluation_views(mesh, envmap, nviews=8, resolution=512):
     }
 
 
+def render_glb_silhouettes(glb_mesh, nviews=8, resolution=512):
+    """Render silhouette alpha masks from a GLB trimesh using nvdiffrast.
+
+    Uses the same camera setup as render_evaluation_views so that
+    A1 silhouette comparison is consistent.
+
+    Returns:
+        list of (H, W) uint8 alpha masks (0 or 255)
+    """
+    import nvdiffrast.torch as dr
+    import utils3d
+
+    device = 'cuda'
+    glctx = dr.RasterizeCudaContext(device=device)
+
+    vertices = torch.tensor(glb_mesh.vertices, dtype=torch.float32, device=device)
+    faces = torch.tensor(glb_mesh.faces, dtype=torch.int32, device=device)
+
+    all_yaw, all_pitch, all_r, all_fov = _get_eval_cameras(nviews)
+
+    alpha_list = []
+    for yaw, pitch, r, fov in zip(all_yaw, all_pitch, all_r, all_fov):
+        fov_rad = torch.deg2rad(torch.tensor(float(fov))).to(device)
+        yaw_t = torch.tensor(float(yaw)).to(device)
+        pitch_t = torch.tensor(float(pitch)).to(device)
+
+        # GLB Y-up convention (postprocess Y/Z swap: x,z,-y)
+        orig_x = torch.sin(yaw_t) * torch.cos(pitch_t)
+        orig_y = torch.cos(yaw_t) * torch.cos(pitch_t)
+        orig_z = torch.sin(pitch_t)
+        orig = torch.tensor([orig_x.item(), orig_z.item(), -orig_y.item()],
+                            device=device) * r
+
+        extr = utils3d.torch.extrinsics_look_at(
+            orig,
+            torch.zeros(3, device=device),
+            torch.tensor([0, 1, 0], dtype=torch.float32, device=device)
+        )
+        intr = utils3d.torch.intrinsics_from_fov_xy(fov_rad, fov_rad)
+
+        near, far = 0.1, 100.0
+        fx, fy = intr[0, 0], intr[1, 1]
+        cx, cy = intr[0, 2], intr[1, 2]
+        proj = torch.zeros((4, 4), dtype=torch.float32, device=device)
+        proj[0, 0] = 2 * fx
+        proj[1, 1] = 2 * fy
+        proj[0, 2] = 2 * cx - 1
+        proj[1, 2] = -2 * cy + 1
+        proj[2, 2] = (far + near) / (far - near)
+        proj[2, 3] = 2 * near * far / (near - far)
+        proj[3, 2] = 1.0
+
+        verts_homo = torch.cat([vertices, torch.ones_like(vertices[:, :1])], dim=-1)
+        verts_clip = (verts_homo @ (proj @ extr).T).unsqueeze(0)
+
+        rast, _ = dr.rasterize(glctx, verts_clip, faces, (resolution, resolution))
+        mask = (rast[0, :, :, 3] > 0).cpu().numpy().astype(np.uint8) * 255
+        alpha_list.append(mask)
+
+    return alpha_list
+
+
 def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
                           output_prefix="test", best_of_n=1, quality_verifier=None,
                           texture_refiner=None, silhouette_corrector=None):
@@ -972,38 +1068,123 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
     img = Image.open(image_path)
     processed = pipeline.preprocess_image(img)
 
-    # Run pipeline
+    # Run pipeline (staged Best-of-N or standard)
+    staged_bon = config.get('staged_bon', 0)
     t0 = time.time()
-    outputs, latents = pipeline.run(
-        processed,
-        seed=config.get('seed', 42),
-        preprocess_image=False,
-        sparse_structure_sampler_params={
-            "steps": config['ss_sampling_steps'],
-            "guidance_strength": config['ss_guidance_strength'],
-            "guidance_rescale": config['ss_guidance_rescale'],
-            "rescale_t": config['ss_rescale_t'],
-        },
-        shape_slat_sampler_params={
-            "steps": config['shape_slat_sampling_steps'],
-            "guidance_strength": config['shape_slat_guidance_strength'],
-            "guidance_rescale": config['shape_slat_guidance_rescale'],
-            "rescale_t": config['shape_slat_rescale_t'],
-        },
-        tex_slat_sampler_params={
-            "steps": config['tex_slat_sampling_steps'],
-            "guidance_strength": config['tex_slat_guidance_strength'],
-            "guidance_rescale": config['tex_slat_guidance_rescale'],
-            "rescale_t": config['tex_slat_rescale_t'],
-            "cfg_mp_strength": config.get('cfg_mp_strength', 0.0),
-        },
-        pipeline_type={
-            "512": "512", "1024": "1024_cascade", "1536": "1536_cascade",
-        }.get(config.get('resolution', '1024'), '1024_cascade'),
-        return_latent=True,
-        best_of_n=best_of_n,
-        quality_verifier=quality_verifier,
-    )
+
+    if staged_bon > 1:
+        print(f"  Using staged Best-of-N with N={staged_bon}", flush=True)
+        outputs, latents = pipeline._run_staged_bon(
+            processed,
+            n_shapes=staged_bon,
+            seed=config.get('seed', 42),
+            sparse_structure_sampler_params={
+                "steps": config['ss_sampling_steps'],
+                "guidance_strength": config['ss_guidance_strength'],
+                "guidance_rescale": config['ss_guidance_rescale'],
+                "rescale_t": config['ss_rescale_t'],
+                "multistep": config.get('multistep', False),
+                "schedule": config.get('ss_schedule', config.get('schedule', 'uniform')),
+                "schedule_rho": config.get('schedule_rho', 7.0),
+                "guidance_schedule": config.get('ss_guidance_schedule', 'binary'),
+                "guidance_beta_a": config.get('ss_guidance_beta_a', 2.0),
+                "guidance_beta_b": config.get('ss_guidance_beta_b', 5.0),
+            },
+            shape_slat_sampler_params={
+                "steps": config['shape_slat_sampling_steps'],
+                "guidance_strength": config['shape_slat_guidance_strength'],
+                "guidance_rescale": config['shape_slat_guidance_rescale'],
+                "rescale_t": config['shape_slat_rescale_t'],
+                "multistep": config.get('multistep', False),
+                "schedule": config.get('shape_schedule', config.get('schedule', 'uniform')),
+                "schedule_rho": config.get('schedule_rho', 7.0),
+                "guidance_schedule": config.get('shape_guidance_schedule', 'binary'),
+                "guidance_beta_a": config.get('shape_guidance_beta_a', 2.0),
+                "guidance_beta_b": config.get('shape_guidance_beta_b', 5.0),
+            },
+            tex_slat_sampler_params={
+                "steps": config['tex_slat_sampling_steps'],
+                "guidance_strength": config['tex_slat_guidance_strength'],
+                "guidance_rescale": config['tex_slat_guidance_rescale'],
+                "rescale_t": config['tex_slat_rescale_t'],
+                "cfg_mp_strength": config.get('cfg_mp_strength', 0.0),
+                "heun_steps": config.get('heun_steps', 0),
+                "multistep": config.get('multistep', False),
+                "schedule": config.get('tex_schedule', config.get('schedule', 'uniform')),
+                "guidance_schedule": config.get('tex_guidance_schedule', 'binary'),
+                "guidance_beta_a": config.get('tex_guidance_beta_a', 2.0),
+                "guidance_beta_b": config.get('tex_guidance_beta_b', 5.0),
+                "guidance_interval": tuple(config.get('tex_guidance_interval', (0.0, 1.0))),
+                "guidance_anneal_min": config.get('tex_guidance_anneal_min', 0.0),
+                "guidance_anneal_start": config.get('tex_guidance_anneal_start', 0.3),
+            },
+            pipeline_type={
+                "512": "512", "1024": "1024_cascade", "1536": "1536_cascade",
+            }.get(config.get('resolution', '1024'), '1024_cascade'),
+            return_latent=True,
+        )
+    else:
+        outputs, latents = pipeline.run(
+            processed,
+            seed=config.get('seed', 42),
+            preprocess_image=False,
+            sparse_structure_sampler_params={
+                "steps": config['ss_sampling_steps'],
+                "guidance_strength": config['ss_guidance_strength'],
+                "guidance_rescale": config['ss_guidance_rescale'],
+                "rescale_t": config['ss_rescale_t'],
+                "multistep": config.get('multistep', False),
+                "schedule": config.get('ss_schedule', config.get('schedule', 'uniform')),
+                "schedule_rho": config.get('schedule_rho', 7.0),
+                "schedule_power": config.get('ss_schedule_power', config.get('schedule_power', 2.0)),
+                # Guidance schedule for SS stage
+                "guidance_schedule": config.get('ss_guidance_schedule', 'binary'),
+                "guidance_beta_a": config.get('ss_guidance_beta_a', 2.0),
+                "guidance_beta_b": config.get('ss_guidance_beta_b', 5.0),
+                **({'guidance_interval': tuple(config['ss_guidance_interval'])} if 'ss_guidance_interval' in config else {}),
+            },
+            shape_slat_sampler_params={
+                "steps": config['shape_slat_sampling_steps'],
+                "guidance_strength": config['shape_slat_guidance_strength'],
+                "guidance_rescale": config['shape_slat_guidance_rescale'],
+                "rescale_t": config['shape_slat_rescale_t'],
+                "multistep": config.get('multistep', False),
+                "schedule": config.get('shape_schedule', config.get('schedule', 'uniform')),
+                "schedule_rho": config.get('schedule_rho', 7.0),
+                "schedule_power": config.get('shape_schedule_power', config.get('schedule_power', 2.0)),
+                # Guidance schedule for shape stage
+                "guidance_schedule": config.get('shape_guidance_schedule', 'binary'),
+                "guidance_beta_a": config.get('shape_guidance_beta_a', 2.0),
+                "guidance_beta_b": config.get('shape_guidance_beta_b', 5.0),
+                **({'guidance_interval': tuple(config['shape_guidance_interval'])} if 'shape_guidance_interval' in config else {}),
+            },
+            tex_slat_sampler_params={
+                "steps": config['tex_slat_sampling_steps'],
+                "guidance_strength": config['tex_slat_guidance_strength'],
+                "guidance_rescale": config['tex_slat_guidance_rescale'],
+                "rescale_t": config['tex_slat_rescale_t'],
+                "cfg_mp_strength": config.get('cfg_mp_strength', 0.0),
+                "heun_steps": config.get('heun_steps', 0),
+                "multistep": config.get('multistep', False),
+                "schedule": config.get('tex_schedule', config.get('schedule', 'uniform')),
+                "schedule_rho": config.get('schedule_rho', 7.0),
+                "schedule_power": config.get('tex_schedule_power', config.get('schedule_power', 2.0)),
+                # Guidance schedule (only for texture stage — geometry stages use 'binary')
+                "guidance_schedule": config.get('tex_guidance_schedule', 'binary'),
+                "guidance_beta_a": config.get('tex_guidance_beta_a', 2.0),
+                "guidance_beta_b": config.get('tex_guidance_beta_b', 5.0),
+                "guidance_interval": tuple(config.get('tex_guidance_interval', (0.0, 1.0))),
+                # Guidance anneal: reduce guidance near t=0 to preserve fine detail
+                "guidance_anneal_min": config.get('tex_guidance_anneal_min', 0.0),
+                "guidance_anneal_start": config.get('tex_guidance_anneal_start', 0.3),
+            },
+            pipeline_type={
+                "512": "512", "1024": "1024_cascade", "1536": "1536_cascade",
+            }.get(config.get('resolution', '1024'), '1024_cascade'),
+            return_latent=True,
+            best_of_n=best_of_n,
+            quality_verifier=quality_verifier,
+        )
     gen_time = time.time() - t0
     print(f"  Generation: {gen_time:.1f}s", flush=True)
     _log_memory("post-generation")
@@ -1077,14 +1258,32 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
     if glb is not None and silhouette_corrector is not None:
         t0_sil = time.time()
         try:
+            silcorr_kwargs = {
+                'yaw': 0.0, 'pitch': 0.25, 'r': None, 'fov': 40.0,
+                'num_steps': config.get('silcorr_steps', 100),
+                'lr': config.get('silcorr_lr', 1e-3),
+                'w_silhouette': config.get('silcorr_w_sil', 1.0),
+                'w_laplacian': config.get('silcorr_w_lap', 10.0),
+                'w_normal': config.get('silcorr_w_norm', 3.0),
+                'max_displacement': config.get('silcorr_max_disp', 0.06),
+                'use_dice_loss': config.get('silcorr_dice', True),
+                'multi_resolution': config.get('silcorr_multires', True),
+                'verbose': True,
+            }
             glb = silhouette_corrector.correct(
-                glb, processed,
-                yaw=0.0, pitch=0.25, r=None, fov=40.0,
-                num_steps=80,
-                verbose=True,
+                glb, processed, **silcorr_kwargs,
             )
             sil_time = time.time() - t0_sil
             print(f"  Silhouette correction: {sil_time:.1f}s", flush=True)
+            # Re-render alpha masks from corrected GLB so A1 reflects the fix
+            try:
+                corrected_alphas = render_glb_silhouettes(
+                    glb, nviews=8, resolution=eval_render_res)
+                channels['alpha'] = corrected_alphas
+                print(f"  Re-rendered {len(corrected_alphas)} alpha views from corrected GLB",
+                      flush=True)
+            except Exception as e2:
+                print(f"  Warning: GLB alpha re-render failed ({e2})", flush=True)
         except Exception as e:
             print(f"  Warning: Silhouette correction failed ({e})", flush=True)
             traceback.print_exc()
@@ -1343,6 +1542,9 @@ def main():
         # Sweep mode
         param = args.sweep[0]
         values = [float(v) for v in args.sweep[1:]]
+        # Cast to int for parameters that require integer values
+        if 'steps' in param or 'target' in param or 'size' in param:
+            values = [int(v) for v in values]
         print(f"V4 Sweep mode: {param} = {values}")
         all_results = {}
         for val in values:

@@ -33,10 +33,12 @@ class GuidanceIntervalSamplerMixin:
     """
     A mixin class for samplers that apply classifier-free guidance with interval.
 
-    Supports two scheduling modes:
+    Supports three scheduling modes:
     - 'binary' (default): guidance is fully on within interval, off outside.
     - 'beta': guidance strength is modulated by a beta distribution curve.
               guidance_beta_a/b control the shape (a=2,b=5 peaks early).
+    - 'triangular': symmetric triangle peaking at interval midpoint (TV-CFG style).
+              From "Stage-wise Dynamics of CFG" (arXiv:2509.22007).
     """
 
     def _inference_model(self, model, x_t, t, cond, guidance_strength, guidance_interval,
@@ -49,6 +51,17 @@ class GuidanceIntervalSamplerMixin:
                 if interval_range > 0:
                     t_norm = (t - guidance_interval[0]) / interval_range
                     weight = _beta_weight(t_norm, guidance_beta_a, guidance_beta_b)
+                    effective_strength = 1.0 + (guidance_strength - 1.0) * weight
+                else:
+                    effective_strength = guidance_strength
+                return super()._inference_model(model, x_t, t, cond,
+                                                guidance_strength=effective_strength, **kwargs)
+            elif guidance_schedule == 'triangular':
+                # TV-CFG: symmetric triangle peaking at interval midpoint
+                interval_range = guidance_interval[1] - guidance_interval[0]
+                if interval_range > 0:
+                    t_norm = (t - guidance_interval[0]) / interval_range
+                    weight = 2.0 * t_norm if t_norm <= 0.5 else 2.0 * (1.0 - t_norm)
                     effective_strength = 1.0 + (guidance_strength - 1.0) * weight
                 else:
                     effective_strength = guidance_strength

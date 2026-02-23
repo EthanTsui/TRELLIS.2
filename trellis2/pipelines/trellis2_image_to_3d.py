@@ -2,6 +2,7 @@ from typing import *
 from contextlib import contextmanager, nullcontext
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from PIL import Image
 from .base import Pipeline
@@ -977,6 +978,221 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             )
         return out_mesh
     
+    @torch.no_grad()
+    def _quick_silhouette_dice(
+        self,
+        mesh,
+        ref_alpha: torch.Tensor,
+        resolution: int = 256,
+    ) -> float:
+        """Quick silhouette Dice between a shape mesh and reference alpha.
+
+        Uses a simple front-view render (yaw=0, pitch=0.25) and scale-invariant
+        crop-to-bbox comparison matching V4 A1 methodology.
+
+        Args:
+            mesh: Mesh with .vertices and .faces attributes.
+            ref_alpha: [H, W] binary mask from reference image (0 or 1).
+            resolution: Render resolution.
+
+        Returns:
+            Dice coefficient (0-1).
+        """
+        import nvdiffrast.torch as dr
+        import utils3d
+
+        device = self.device
+        glctx = dr.RasterizeCudaContext(device=device)
+
+        verts = mesh.vertices if isinstance(mesh.vertices, torch.Tensor) else \
+            torch.tensor(mesh.vertices, dtype=torch.float32, device=device)
+        faces = mesh.faces if isinstance(mesh.faces, torch.Tensor) else \
+            torch.tensor(mesh.faces, dtype=torch.int32, device=device)
+
+        # Front view camera (matching V4 evaluator)
+        yaw, pitch_val, r, fov = 0.0, 0.25, 2.0, 40.0
+        fov_rad = torch.deg2rad(torch.tensor(float(fov))).to(device)
+        yaw_t = torch.tensor(float(yaw)).to(device)
+        pitch_t = torch.tensor(float(pitch_val)).to(device)
+
+        orig_x = torch.sin(yaw_t) * torch.cos(pitch_t)
+        orig_y = torch.cos(yaw_t) * torch.cos(pitch_t)
+        orig_z = torch.sin(pitch_t)
+        orig = torch.stack([orig_x, orig_z, -orig_y]) * r
+
+        extr = utils3d.torch.extrinsics_look_at(
+            orig, torch.zeros(3, device=device),
+            torch.tensor([0, 1, 0], dtype=torch.float32, device=device)
+        )
+        intr = utils3d.torch.intrinsics_from_fov_xy(fov_rad, fov_rad)
+
+        # Build projection matrix
+        fx, fy = intr[0, 0], intr[1, 1]
+        cx, cy = intr[0, 2], intr[1, 2]
+        proj = torch.zeros((4, 4), dtype=torch.float32, device=device)
+        proj[0, 0] = 2 * fx; proj[1, 1] = 2 * fy
+        proj[0, 2] = 2 * cx - 1; proj[1, 2] = -2 * cy + 1
+        proj[2, 2] = 101.0 / 99.9; proj[2, 3] = -0.2 / 99.9
+        proj[3, 2] = 1.0
+
+        verts_homo = torch.cat([verts, torch.ones_like(verts[:, :1])], dim=-1)
+        verts_clip = (verts_homo @ (proj @ extr).T).unsqueeze(0)
+        rast, _ = dr.rasterize(glctx, verts_clip, faces, (resolution, resolution))
+        rend_mask = (rast[0, :, :, 3] > 0).float()
+
+        # Scale-invariant crop-to-bbox comparison
+        def _crop_to_bbox(mask, pad_frac=0.05, out_size=256):
+            coords = torch.nonzero(mask > 0.5, as_tuple=False)
+            if len(coords) < 10:
+                return torch.zeros(out_size, out_size, device=mask.device)
+            y0, x0 = coords.min(dim=0).values
+            y1, x1 = coords.max(dim=0).values
+            h, w = (y1 - y0 + 1).item(), (x1 - x0 + 1).item()
+            side = max(h, w)
+            pad = int(side * pad_frac)
+            cy_c, cx_c = ((y0 + y1) // 2).item(), ((x0 + x1) // 2).item()
+            half = side // 2 + pad
+            H, W = mask.shape
+            crop = mask[max(0, cy_c-half):min(H, cy_c+half),
+                       max(0, cx_c-half):min(W, cx_c+half)]
+            if crop.numel() == 0:
+                return torch.zeros(out_size, out_size, device=mask.device)
+            crop_4d = crop.unsqueeze(0).unsqueeze(0)
+            return F.interpolate(crop_4d, size=(out_size, out_size),
+                                mode='bilinear', align_corners=False)[0, 0]
+
+        # Resize ref_alpha to render resolution for crop comparison
+        ref_resized = F.interpolate(
+            ref_alpha.unsqueeze(0).unsqueeze(0),
+            size=(resolution, resolution),
+            mode='bilinear', align_corners=False
+        )[0, 0]
+
+        rend_crop = _crop_to_bbox((rend_mask > 0.5).float())
+        ref_crop = _crop_to_bbox((ref_resized > 0.5).float())
+        rend_bin = (rend_crop > 0.5).float()
+        ref_bin = (ref_crop > 0.5).float()
+
+        intersection = (rend_bin * ref_bin).sum()
+        total = rend_bin.sum() + ref_bin.sum()
+        dice = (2 * intersection / total.clamp(min=1)).item()
+
+        del glctx
+        return dice
+
+    @torch.no_grad()
+    def _run_staged_bon(
+        self,
+        image: Image.Image,
+        n_shapes: int = 4,
+        seed: int = 42,
+        sparse_structure_sampler_params: dict = {},
+        shape_slat_sampler_params: dict = {},
+        tex_slat_sampler_params: dict = {},
+        pipeline_type: Optional[str] = None,
+        max_num_tokens: int = 65536,
+        return_latent: bool = False,
+    ) -> List[MeshWithVoxel]:
+        """Staged Best-of-N: generate N shape candidates, pick best by silhouette
+        Dice, then texture only the winning shape.
+
+        Cost: ~N*shape_time + 1*tex_time (vs N*(shape_time+tex_time) for full Best-of-N).
+        For N=4: ~3x baseline vs ~4x for full Best-of-N.
+
+        Args:
+            image: Preprocessed RGBA image.
+            n_shapes: Number of shape candidates to generate.
+            seed: Base random seed (candidates use seed, seed+1, ..., seed+N-1).
+        """
+        pipeline_type = pipeline_type or self.default_pipeline_type
+        cond_512 = self.get_cond([image], 512)
+        cond_1024 = self.get_cond([image], 1024) if pipeline_type != '512' else None
+        ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pipeline_type]
+
+        # Extract reference alpha from preprocessed RGBA image
+        import numpy as np
+        ref_np = np.array(image.convert('RGBA'))
+        ref_alpha = torch.tensor(
+            (ref_np[:, :, 3] > 128).astype(np.float32),
+            device=self.device
+        )
+
+        print(f"[Staged-BoN] Generating {n_shapes} shape candidates...")
+        best_shape_slat = None
+        best_coords = None
+        best_res = None
+        best_dice = -1.0
+        best_seed = seed
+
+        for i in range(n_shapes):
+            s = seed + i
+            torch.manual_seed(s)
+
+            # Stage 1: Sparse structure
+            coords = self.sample_sparse_structure(
+                cond_512, ss_res, 1, sparse_structure_sampler_params
+            )
+
+            # Stage 2: Shape SLat
+            if pipeline_type == '512':
+                shape_slat = self.sample_shape_slat(
+                    cond_512, self.models['shape_slat_flow_model_512'],
+                    coords, shape_slat_sampler_params)
+                res = 512
+            elif pipeline_type == '1024':
+                shape_slat = self.sample_shape_slat(
+                    cond_1024, self.models['shape_slat_flow_model_1024'],
+                    coords, shape_slat_sampler_params)
+                res = 1024
+            elif pipeline_type in ('1024_cascade', '1536_cascade'):
+                target_res = 1024 if pipeline_type == '1024_cascade' else 1536
+                shape_slat, res = self.sample_shape_slat_cascade(
+                    cond_512, cond_1024,
+                    self.models['shape_slat_flow_model_512'],
+                    self.models['shape_slat_flow_model_1024'],
+                    512, target_res, coords, shape_slat_sampler_params,
+                    max_num_tokens)
+
+            # Quick decode shape (no texture)
+            meshes, _ = self.decode_shape_slat(shape_slat, res)
+            mesh = meshes[0]
+            mesh.fill_holes(max_hole_perimeter=0.3)
+
+            # Compute silhouette Dice
+            dice = self._quick_silhouette_dice(mesh, ref_alpha, resolution=256)
+            print(f"  Candidate {i+1}/{n_shapes} (seed={s}): Dice={dice:.4f}")
+
+            if dice > best_dice:
+                best_shape_slat = shape_slat
+                best_coords = coords
+                best_res = res
+                best_dice = dice
+                best_seed = s
+
+            # Free memory
+            del meshes, mesh, shape_slat, coords
+            torch.cuda.empty_cache()
+
+        print(f"[Staged-BoN] Best: seed={best_seed}, Dice={best_dice:.4f}")
+
+        # Stage 3: Texture only the best shape
+        torch.manual_seed(best_seed)
+        if pipeline_type == '512':
+            tex_slat = self.sample_tex_slat(
+                cond_512, self.models['tex_slat_flow_model_512'],
+                best_shape_slat, tex_slat_sampler_params)
+        else:
+            tex_slat = self.sample_tex_slat(
+                cond_1024, self.models['tex_slat_flow_model_1024'],
+                best_shape_slat, tex_slat_sampler_params)
+
+        torch.cuda.empty_cache()
+        out_mesh = self.decode_latent(best_shape_slat, tex_slat, best_res)
+
+        if return_latent:
+            return out_mesh, (best_shape_slat, tex_slat, best_res)
+        return out_mesh
+
     @torch.no_grad()
     def _run_single(
         self,

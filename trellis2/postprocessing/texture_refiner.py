@@ -40,6 +40,35 @@ def total_variation_loss(texture: torch.Tensor) -> torch.Tensor:
     return (dx.abs().mean() + dy.abs().mean()) * 0.5
 
 
+def laplacian_hf_loss(rendered: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Match Laplacian (high-frequency) energy between rendered and target.
+
+    Encourages the rendered image to have the same amount of fine detail
+    as the reference image, directly targeting the C3 Laplacian energy metric.
+    """
+    # Laplacian kernel
+    kernel = torch.tensor(
+        [[0, 1, 0], [1, -4, 1], [0, 1, 0]],
+        dtype=rendered.dtype, device=rendered.device
+    ).view(1, 1, 3, 3)
+
+    # Convert to grayscale [1, 1, H, W]
+    rend_gray = (0.299 * rendered[..., 0] + 0.587 * rendered[..., 1] + 0.114 * rendered[..., 2])
+    tgt_gray = (0.299 * target[..., 0] + 0.587 * target[..., 1] + 0.114 * target[..., 2])
+    mask_2d = mask[..., 0]
+
+    rend_gray = rend_gray.unsqueeze(0).unsqueeze(0)
+    tgt_gray = tgt_gray.unsqueeze(0).unsqueeze(0)
+    mask_2d = mask_2d.unsqueeze(0).unsqueeze(0)
+
+    rend_lap = F.conv2d(rend_gray, kernel, padding=1)
+    tgt_lap = F.conv2d(tgt_gray, kernel, padding=1)
+
+    # Match Laplacian energy in masked region
+    diff = (rend_lap - tgt_lap) * mask_2d
+    return (diff ** 2).mean()
+
+
 def rgb_to_ycbcr(rgb: torch.Tensor) -> torch.Tensor:
     """Convert RGB [H, W, 3] in [0,1] to YCbCr [H, W, 3].
 
@@ -76,7 +105,7 @@ class TextureRefiner:
     def _get_lpips(self):
         if self._lpips_fn is None:
             import lpips
-            self._lpips_fn = lpips.LPIPS(net='alex').to(self.device).eval()
+            self._lpips_fn = lpips.LPIPS(net='vgg').to(self.device).eval()
         return self._lpips_fn
 
     def _extract_mesh_data(self, mesh: trimesh.Trimesh) -> dict:
@@ -305,9 +334,10 @@ class TextureRefiner:
         lr: float = 0.005,
         chroma_weight: float = 1.0,
         lpips_weight: float = 0.3,
-        tv_weight: float = 0.01,
+        tv_weight: float = 0.001,
         sat_weight: float = 0.1,
-        render_resolution: int = 512,
+        hf_weight: float = 0.3,
+        render_resolution: int = 768,
         camera_yaw: float = 0.0,
         camera_pitch: float = 0.25,
         camera_r: float = 2.0,
@@ -323,8 +353,9 @@ class TextureRefiner:
             lr: Learning rate for Adam optimizer.
             chroma_weight: Weight for chrominance L1 loss (YCbCr Cb,Cr only).
             lpips_weight: Weight for LPIPS perceptual loss.
-            tv_weight: Weight for total variation regularization.
+            tv_weight: Weight for total variation regularization (low=0.001 to preserve detail).
             sat_weight: Weight for saturation preservation.
+            hf_weight: Weight for Laplacian high-frequency matching loss (targets C3 metric).
             render_resolution: Resolution for differentiable rendering.
             camera_yaw/pitch/r/fov: Camera parameters matching input viewpoint.
             verbose: Print progress.
@@ -371,6 +402,12 @@ class TextureRefiner:
                 lpips_fn, chroma_weight, lpips_weight, tv_weight, sat_weight,
                 texture_orig_rgb,
             )
+
+            # Laplacian high-frequency matching: encourages texture detail
+            if hf_weight > 0:
+                hf_loss = laplacian_hf_loss(rendered, target, mask)
+                loss = loss + hf_weight * hf_loss
+                loss_dict['hf'] = hf_loss.item()
 
             loss.backward()
             optimizer.step()

@@ -8,6 +8,59 @@ from .classifier_free_guidance_mixin import ClassifierFreeGuidanceSamplerMixin
 from .guidance_interval_mixin import GuidanceIntervalSamplerMixin
 
 
+def build_timestep_schedule(steps, schedule='uniform', rescale_t=1.0, sigma_min=1e-5, **kwargs):
+    """Build a timestep schedule from t=1 (noise) to t=0 (data).
+
+    Args:
+        steps: Number of ODE steps.
+        schedule: 'uniform' (default), 'edm', 'logsnr', or 'quadratic'.
+        rescale_t: Rescaling factor (only used with 'uniform' schedule).
+        sigma_min: Minimum noise scale for flow matching.
+        **kwargs: 'rho' for EDM schedule (default 7.0),
+                  'power' for quadratic schedule exponent (default 2.0).
+
+    Returns:
+        List of float timestep values (length steps+1) from ~1 to ~0.
+    """
+    if schedule == 'uniform':
+        t_seq = np.linspace(1, 0, steps + 1)
+        if rescale_t != 1.0:
+            t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
+
+    elif schedule == 'edm':
+        # Karras et al. (2022): σ_i = (σ_max^(1/ρ) + i/N*(σ_min^(1/ρ) - σ_max^(1/ρ)))^ρ
+        rho = kwargs.get('rho', 7.0)
+        sigma_max = 1.0
+        i_frac = np.linspace(0, 1, steps + 1)
+        sigmas = (sigma_max ** (1 / rho) + i_frac * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
+        t_seq = np.clip((sigmas - sigma_min) / (1 - sigma_min), 0, 1)
+
+    elif schedule == 'logsnr':
+        # Uniform spacing in log signal-to-noise ratio
+        eps = 1e-4
+        t_hi, t_lo = 1 - eps, eps
+        sigma_hi = sigma_min + (1 - sigma_min) * t_hi
+        sigma_lo = sigma_min + (1 - sigma_min) * t_lo
+        logsnr_hi = 2 * np.log((1 - t_hi) / sigma_hi)  # low SNR (noisy)
+        logsnr_lo = 2 * np.log((1 - t_lo) / sigma_lo)   # high SNR (clean)
+        logsnr_seq = np.linspace(logsnr_hi, logsnr_lo, steps + 1)
+        r = np.exp(logsnr_seq / 2)
+        t_seq = (1 - r * sigma_min) / (1 + r * (1 - sigma_min))
+        t_seq = np.clip(t_seq, 0, 1)
+
+    elif schedule == 'quadratic':
+        # t_i = (i/N)^p — more steps near t=0 (fine detail)
+        # power=2.0 is classic quadratic; 1.5 is gentler; 3.0 is more aggressive
+        power = kwargs.get('power', 2.0)
+        i_frac = np.linspace(1, 0, steps + 1)
+        t_seq = i_frac ** power
+
+    else:
+        raise ValueError(f"Unknown schedule: {schedule}. Use 'uniform', 'edm', 'logsnr', or 'quadratic'.")
+
+    return t_seq.tolist()
+
+
 class FlowEulerSampler(Sampler):
     """
     Generate samples from a flow-matching model using Euler sampling.
@@ -119,16 +172,32 @@ class FlowEulerSampler(Sampler):
         heun_steps = kwargs.pop('heun_steps', 0)
         # AB2: Adams-Bashforth 2nd order multistep (free accuracy, no extra model calls)
         multistep = kwargs.pop('multistep', False)
+        # Timestep schedule: 'uniform' (default), 'edm', 'logsnr', 'quadratic'
+        schedule = kwargs.pop('schedule', 'uniform')
+        schedule_rho = kwargs.pop('schedule_rho', 7.0)
+        schedule_power = kwargs.pop('schedule_power', 2.0)
+        # Guidance anneal: reduce guidance near t=0 to preserve fine detail
+        # guidance_anneal_min = minimum fraction of guidance at t=0 (0=off, 0.25=reduce to 25%)
+        guidance_anneal_min = kwargs.pop('guidance_anneal_min', 0.0)
+        guidance_anneal_start = kwargs.pop('guidance_anneal_start', 0.3)
 
         sample = noise
-        t_seq = np.linspace(1, 0, steps + 1)
-        t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
-        t_seq = t_seq.tolist()
+        t_seq = build_timestep_schedule(
+            steps, schedule=schedule, rescale_t=rescale_t,
+            sigma_min=self.sigma_min, rho=schedule_rho, power=schedule_power,
+        )
         t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
         ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
         prev_v = None  # for AB2 multistep
         prev_dt = None
+        orig_guidance = kwargs.get('guidance_strength', None)
         for step_idx, (t, t_prev) in enumerate(tqdm(t_pairs, desc=tqdm_desc, disable=not verbose)):
+            # Apply guidance anneal: linearly reduce guidance from full to min_frac as t → 0
+            if guidance_anneal_min > 0 and orig_guidance is not None and t < guidance_anneal_start:
+                frac = t / guidance_anneal_start  # 1.0 at start, 0.0 at t=0
+                kwargs['guidance_strength'] = orig_guidance * (guidance_anneal_min + (1 - guidance_anneal_min) * frac)
+            elif orig_guidance is not None and guidance_anneal_min > 0:
+                kwargs['guidance_strength'] = orig_guidance
             if step_idx < zero_init_steps:
                 # CFG-Zero*: hold position for early steps
                 ret.pred_x_t.append(sample)

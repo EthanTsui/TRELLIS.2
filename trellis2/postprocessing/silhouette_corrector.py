@@ -329,6 +329,22 @@ class SilhouetteCorrector:
         bce = -(target_mask * torch.log(p) + (1 - target_mask) * torch.log(1 - p))
         return (bce * dt_weights).mean()
 
+    def _soft_dice_loss(
+        self,
+        rendered_mask: torch.Tensor,
+        target_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Soft Dice loss — directly optimizes the A1 evaluation metric.
+
+        Dice = 2*|A∩B| / (|A|+|B|). Differentiable via soft mask.
+        Loss = 1 - Dice so that minimizing loss maximizes Dice.
+        """
+        p = rendered_mask[0, :, :, 0]
+        intersection = (p * target_mask).sum()
+        total = p.sum() + target_mask.sum()
+        dice = (2 * intersection + 1) / (total + 1)  # +1 for numerical stability
+        return 1.0 - dice
+
     def _compute_scale_invariant_dice(
         self,
         rendered_mask: torch.Tensor,
@@ -355,13 +371,15 @@ class SilhouetteCorrector:
         pitch: float = 0.25,
         r: float = None,
         fov: float = 40.0,
-        num_steps: int = 80,
-        lr: float = 5e-4,
+        num_steps: int = 100,
+        lr: float = 1e-3,
         w_silhouette: float = 1.0,
-        w_laplacian: float = 50.0,
-        w_normal: float = 5.0,
-        max_displacement: float = 0.02,
+        w_laplacian: float = 10.0,
+        w_normal: float = 3.0,
+        max_displacement: float = 0.06,
         resolution: int = 512,
+        use_dice_loss: bool = True,
+        multi_resolution: bool = True,
         verbose: bool = True,
     ) -> trimesh.Trimesh:
         """Correct mesh silhouette to match reference image alpha mask.
@@ -383,6 +401,8 @@ class SilhouetteCorrector:
             w_normal: Weight for normal consistency loss.
             max_displacement: Max vertex displacement (fraction of unit cube).
             resolution: Render resolution for silhouette comparison.
+            use_dice_loss: Use Soft Dice loss instead of BCE (directly optimizes A1).
+            multi_resolution: Two-stage: coarse pass at 256px then fine at resolution.
             verbose: Print progress.
 
         Returns:
@@ -442,52 +462,85 @@ class SilhouetteCorrector:
             if verbose:
                 print(f"  Initial scale-invariant Dice: {init_dice:.4f}")
 
+        # Build optimization stages
+        if multi_resolution and resolution > 256:
+            # Stage 1: coarse (256px, half steps) for large movements
+            # Stage 2: fine (full resolution, remaining steps) for boundary refinement
+            coarse_steps = num_steps // 3
+            fine_steps = num_steps - coarse_steps
+            stages = [
+                (256, coarse_steps, lr, max_displacement),
+                (resolution, fine_steps, lr * 0.5, max_displacement),
+            ]
+        else:
+            stages = [(resolution, num_steps, lr, max_displacement)]
+
         # Optimize
-        optimizer = torch.optim.Adam([vertices_opt], lr=lr)
         best_dice = init_dice
         best_vertices = vertices_orig.clone()
+        global_step = 0
 
-        for step in range(num_steps):
-            optimizer.zero_grad()
+        for stage_idx, (stage_res, stage_steps, stage_lr, stage_max_disp) in enumerate(stages):
+            if verbose and len(stages) > 1:
+                print(f"  Stage {stage_idx+1}/{len(stages)}: {stage_res}px, {stage_steps} steps")
 
-            mask = self._render_silhouette(
-                vertices_opt, faces, extr, perspective, resolution
+            # Prepare target at stage resolution
+            stage_target, stage_dt, _ = self._precompute_target(
+                reference_image, stage_res
             )
 
-            l_sil = self._silhouette_loss(mask, target_mask, dt_weights)
-            l_lap = self._laplacian_loss(vertices_opt, faces, original_lap)
-            l_norm = self._normal_consistency_loss(vertices_opt, faces, original_normals)
+            optimizer = torch.optim.Adam([vertices_opt], lr=stage_lr)
 
-            loss = w_silhouette * l_sil + w_laplacian * l_lap + w_normal * l_norm
-            loss.backward()
-            optimizer.step()
+            for step in range(stage_steps):
+                optimizer.zero_grad()
 
-            # Clamp displacement
-            with torch.no_grad():
-                disp = vertices_opt - vertices_orig
-                mag = disp.norm(dim=-1, keepdim=True)
-                clamped = torch.where(
-                    mag > max_displacement,
-                    disp * max_displacement / mag,
-                    disp
+                mask = self._render_silhouette(
+                    vertices_opt, faces, extr, perspective, stage_res
                 )
-                vertices_opt.copy_(vertices_orig + clamped)
 
-            # Track best Dice every 10 steps
-            if (step + 1) % 10 == 0 or step == num_steps - 1:
+                if use_dice_loss:
+                    l_sil = self._soft_dice_loss(mask, stage_target)
+                else:
+                    l_sil = self._silhouette_loss(mask, stage_target, stage_dt)
+                l_lap = self._laplacian_loss(vertices_opt, faces, original_lap)
+                l_norm = self._normal_consistency_loss(vertices_opt, faces, original_normals)
+
+                loss = w_silhouette * l_sil + w_laplacian * l_lap + w_normal * l_norm
+                loss.backward()
+                optimizer.step()
+
+                # Clamp displacement
                 with torch.no_grad():
-                    dice = self._compute_scale_invariant_dice(mask, target_mask)
-                    if dice > best_dice:
-                        best_dice = dice
-                        best_vertices = vertices_opt.data.clone()
-                    if verbose:
-                        max_disp = (vertices_opt - vertices_orig).norm(dim=-1).max().item()
-                        print(
-                            f"  Step {step+1}/{num_steps}: "
-                            f"sil={l_sil:.4f} lap={l_lap:.6f} "
-                            f"norm={l_norm:.6f} dice={dice:.4f} "
-                            f"max_disp={max_disp:.5f}"
+                    disp = vertices_opt - vertices_orig
+                    mag = disp.norm(dim=-1, keepdim=True)
+                    clamped = torch.where(
+                        mag > stage_max_disp,
+                        disp * stage_max_disp / mag,
+                        disp
+                    )
+                    vertices_opt.copy_(vertices_orig + clamped)
+
+                global_step += 1
+
+                # Track best Dice every 10 steps
+                if (step + 1) % 10 == 0 or step == stage_steps - 1:
+                    with torch.no_grad():
+                        # Always evaluate at full resolution for consistent tracking
+                        eval_mask = self._render_silhouette(
+                            vertices_opt, faces, extr, perspective, resolution
                         )
+                        dice = self._compute_scale_invariant_dice(eval_mask, target_mask)
+                        if dice > best_dice:
+                            best_dice = dice
+                            best_vertices = vertices_opt.data.clone()
+                        if verbose:
+                            max_disp = (vertices_opt - vertices_orig).norm(dim=-1).max().item()
+                            print(
+                                f"  Step {global_step}/{num_steps}: "
+                                f"sil={l_sil:.4f} lap={l_lap:.6f} "
+                                f"norm={l_norm:.6f} dice={dice:.4f} "
+                                f"max_disp={max_disp:.5f}"
+                            )
 
         # Apply best vertices to mesh
         improvement = best_dice - init_dice

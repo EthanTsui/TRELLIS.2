@@ -480,7 +480,7 @@ class QualityVerifier:
         self,
         mesh,
         reference_image: Union[Image.Image, np.ndarray],
-        num_views: int = 6,
+        num_views: int = 8,
         render_resolution: int = 512,
         use_dreamsim: bool = False,
         depth_estimator=None,
@@ -490,10 +490,13 @@ class QualityVerifier:
         V4-aligned scoring: uses the same metrics as auto_evaluate_v4.py
         so Best-of-N selection picks candidates that maximize V4 score.
 
+        Camera setup matches V4 exactly: 8 yaws × 4 pitches = 32 views,
+        r=2, fov=40, resolution=512.
+
         Args:
             mesh: MeshWithVoxel or similar renderable mesh.
             reference_image: Input image (PIL RGBA or numpy array).
-            num_views: Number of views to render for scoring.
+            num_views: Number of yaw views per pitch level (8 = V4 default).
             render_resolution: Resolution for renders.
             use_dreamsim: Whether to use DreamSim (unused, kept for API compat).
             depth_estimator: Optional DepthEstimator (unused, kept for API compat).
@@ -513,8 +516,11 @@ class QualityVerifier:
             voxel_shape=mesh.voxel_shape,
             layout=mesh.layout,
         )
-        # Quick simplify to 500K for fast rendering during candidate scoring
-        score_mesh.simplify(500000)
+        # Simplify to 4M faces for scoring — must stay close to V4 evaluator's
+        # full-resolution rendering (16M cap) so silhouette Dice correlates well
+        # with V4 A1. Previous 500K target lost 93% of geometry, causing BoN to
+        # select candidates with worse silhouette accuracy.
+        score_mesh.simplify(4000000)
 
         renders = self.render_views(score_mesh, num_views, render_resolution)
 

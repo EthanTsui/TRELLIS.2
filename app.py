@@ -447,6 +447,7 @@ def image_to_3d(
     fdg_lambda_low: float,
     fdg_lambda_high: float,
     multistep: bool,
+    schedule: str,
     best_of_n: int,
     back_image: Optional[Image.Image],
     left_image: Optional[Image.Image],
@@ -492,6 +493,7 @@ def image_to_3d(
             "guidance_rescale": ss_guidance_rescale,
             "rescale_t": ss_rescale_t,
             "multistep": multistep,
+            "schedule": schedule,
         },
         shape_slat_sampler_params={
             "steps": shape_slat_sampling_steps,
@@ -499,6 +501,7 @@ def image_to_3d(
             "guidance_rescale": shape_slat_guidance_rescale,
             "rescale_t": shape_slat_rescale_t,
             "multistep": multistep,
+            "schedule": schedule,
         },
         tex_slat_sampler_params={
             "steps": tex_slat_sampling_steps,
@@ -508,6 +511,7 @@ def image_to_3d(
             "cfg_mp_strength": tex_slat_cfg_mp_strength,
             "heun_steps": tex_slat_heun_steps,
             "multistep": multistep,
+            "schedule": schedule,
             "cfg_mode": "fdg" if fdg_enabled else "standard",
             "fdg_sigma": 1.0,
             "fdg_lambda_low": fdg_lambda_low,
@@ -800,7 +804,12 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                     fdg_enabled = gr.Checkbox(label="Enable FDG (texture stage)", value=False)
                     fdg_lambda_low = gr.Slider(0.0, 2.0, label="FDG Low-Freq Weight", value=0.6, step=0.05)
                     fdg_lambda_high = gr.Slider(0.0, 3.0, label="FDG High-Freq Weight", value=1.3, step=0.05)
-                multistep = gr.Checkbox(label="AB2 Multistep (free 2nd-order accuracy)", value=True)
+                with gr.Row():
+                    multistep = gr.Checkbox(label="AB2 Multistep (free 2nd-order accuracy)", value=True)
+                    schedule = gr.Dropdown(
+                        choices=["uniform", "edm", "logsnr", "quadratic"],
+                        label="Timestep Schedule", value="uniform",
+                    )
                 best_of_n = gr.Slider(1, 8, label="Best-of-N (generate N candidates, pick best)", value=1, step=1)
 
         with gr.Column(scale=10):
@@ -853,7 +862,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t, tex_slat_cfg_mp_strength, tex_slat_heun_steps,
             fdg_enabled, fdg_lambda_low, fdg_lambda_high,
-            multistep, best_of_n,
+            multistep, schedule, best_of_n,
             back_image, left_image, right_image, top_image, bottom_image,
             multiview_layout, multiview_mode, texture_multiview_mode, custom_angles,
         ],
