@@ -240,11 +240,19 @@ class FlowEulerSampler(Sampler):
                           and _cur_guidance > 1.0 and step_idx >= zero_init_steps)
             if step_idx == 0 and rectified_cfgpp:
                 print(f"  [R-CFG++ debug] rectified_cfgpp={rectified_cfgpp}, guidance={_cur_guidance}, "
-                      f"use_rcfgpp={use_rcfgpp}, neg_cond={'present' if kwargs.get('neg_cond') is not None else 'MISSING'}", flush=True)
+                      f"use_rcfgpp={use_rcfgpp}, neg_cond={'present' if kwargs.get('neg_cond') is not None else 'MISSING'}, "
+                      f"concat_cond={'present' if kwargs.get('concat_cond') is not None else 'MISSING'}", flush=True)
 
             if use_rcfgpp:
                 # Rectified-CFG++: 3-NFE predictor-corrector (bypasses CFG mixin)
                 neg_cond_rc = kwargs.get('neg_cond', None)
+
+                # Extract model-level kwargs (e.g. concat_cond for texture cross-attn)
+                # that must be forwarded to direct model calls, excluding sampler/guidance params
+                _sampler_keys = {'neg_cond', 'guidance_strength', 'guidance_rescale',
+                                 'cfg_mode', 'apg_alpha', 'fdg_sigma', 'fdg_lambda_low',
+                                 'fdg_lambda_high', 'fdg_time_schedule', 'guidance_interval'}
+                model_kwargs = {k: v for k, v in kwargs.items() if k not in _sampler_keys}
 
                 # Alpha schedule: lambda_max * (1-t)^gamma
                 alpha_t = rcfgpp_lambda_max
@@ -258,7 +266,7 @@ class FlowEulerSampler(Sampler):
 
                 # Phase 1: Conditional predictor (full Euler step)
                 v_cond = FlowEulerSampler._inference_model(
-                    self, model, sample, t, cond)
+                    self, model, sample, t, cond, **model_kwargs)
                 x_pred = sample - dt * v_cond
 
                 # Optional noise injection (disabled near t=0)
@@ -272,10 +280,10 @@ class FlowEulerSampler(Sampler):
 
                 # Phase 2: Evaluate cond + uncond at predicted point
                 v_cond_pred = FlowEulerSampler._inference_model(
-                    self, model, x_pred, t_prev, cond)
+                    self, model, x_pred, t_prev, cond, **model_kwargs)
                 if neg_cond_rc is not None and alpha_t > 0:
                     v_uncond_pred = FlowEulerSampler._inference_model(
-                        self, model, x_pred, t_prev, neg_cond_rc)
+                        self, model, x_pred, t_prev, neg_cond_rc, **model_kwargs)
                 else:
                     v_uncond_pred = v_cond_pred
 

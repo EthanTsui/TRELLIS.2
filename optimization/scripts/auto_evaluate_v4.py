@@ -1401,6 +1401,26 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
             print(f"  Warning: Texture refinement failed ({e})", flush=True)
             traceback.print_exc()
 
+    # Color transfer (LAB chrominance histogram matching)
+    color_transfer_mode = config.get('color_transfer', None)
+    if glb is not None and color_transfer_mode:
+        t0_ct = time.time()
+        try:
+            from trellis2.postprocessing.color_transfer import apply_color_transfer_to_texture
+            ct_strength = config.get('color_transfer_strength', 0.7)
+            glb = apply_color_transfer_to_texture(
+                glb, processed,
+                mode=color_transfer_mode,
+                blend_strength=ct_strength,
+                verbose=True,
+            )
+            ct_time = time.time() - t0_ct
+            print(f"  Color transfer: {ct_time:.1f}s ({color_transfer_mode}, "
+                  f"strength={ct_strength})", flush=True)
+        except Exception as e:
+            print(f"  Warning: Color transfer failed ({e})", flush=True)
+            traceback.print_exc()
+
     # Save GLB
     glb_path = None
     if glb is not None:

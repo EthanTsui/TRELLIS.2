@@ -288,6 +288,14 @@ PRESETS = {
         'mq_noremesh':   {'remesh': False},  # standard path preserves FDG vertex positions
         'mq_frag200':    {'min_fragment_faces': 200},  # remove more floating debris
     },
+    # Color transfer: LAB chrominance histogram matching to improve A2
+    # Directly targets histogram correlation + LAB ΔE components of A2 metric
+    'color_transfer': {
+        'ct_baseline':    {},  # no color transfer
+        'ct_hist_07':     {'color_transfer': 'histogram', 'color_transfer_strength': 0.7},   # moderate
+        'ct_hist_10':     {'color_transfer': 'histogram', 'color_transfer_strength': 1.0},   # full
+        'ct_hist_04':     {'color_transfer': 'histogram', 'color_transfer_strength': 0.4},   # gentle
+    },
     # Decimation target: higher → more faces → more geometric detail
     # Champion config uses 800K (matching app.py default)
     'decimation': {
