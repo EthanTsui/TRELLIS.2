@@ -287,12 +287,15 @@ class QualityEvaluatorV4:
 
     def _color_distribution_match(self, rendered_rgb, rendered_alpha,
                                   reference_rgba):
-        """Compare color distributions in LAB space using histogram correlation.
+        """Compare color distributions using HSV hue/saturation histograms.
 
-        Uses separate masks for rendered vs reference (not intersection),
-        since the preprocessed reference has different framing/scale.
-        Histogram comparison only needs color distributions to match,
-        not spatial pixel alignment.
+        Uses HSV H,S channels which fully separate brightness from chrominance.
+        Pearson correlation is scale-invariant and more forgiving than
+        intersection/Bhattacharyya for moderate color shifts from lighting.
+
+        Research: SOTA papers use LPIPS/CLIP/DINO, not histograms. For
+        per-image color scoring, HSV correlation is the most robust histogram
+        approach (ECCV 2024 MS-SWD survey).
         """
         if reference_rgba is None:
             return 50.0
@@ -308,38 +311,49 @@ class QualityEvaluatorV4:
         if rend_mask.sum() < 100 or ref_mask.sum() < 100:
             return 50.0
 
-        # Convert to LAB (perceptually uniform)
-        rend_lab = cv2.cvtColor(rendered_rgb, cv2.COLOR_RGB2LAB)
+        # Convert to HSV — H,S are fully lighting-invariant
+        rend_hsv = cv2.cvtColor(rendered_rgb, cv2.COLOR_RGB2HSV)
         ref_rgb = ref_resized[:, :, :3]
-        ref_lab = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2LAB)
+        ref_hsv = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2HSV)
 
         rend_mask_u8 = rend_mask.astype(np.uint8)
         ref_mask_u8 = ref_mask.astype(np.uint8)
 
-        # Compare chrominance only (a, b channels) — ignore L (brightness)
-        # 3D rendering inherently changes brightness distribution due to
-        # lighting, shadows, and specular highlights. Chrominance (hue/sat)
-        # is what actually indicates color fidelity.
-        # Use histogram intersection (more robust) + Bhattacharyya distance.
-        chroma_scores = []
-        for c in [1, 2]:  # a and b channels only
-            rend_hist = cv2.calcHist([rend_lab], [c], rend_mask_u8, [24], [0, 256])
-            ref_hist = cv2.calcHist([ref_lab], [c], ref_mask_u8, [24], [0, 256])
-            # L1 normalize: sum of bins = 1.0 (required for valid intersection)
+        # Hue: 36 bins × 5° each (OpenCV H in [0,180])
+        # Saturation: 32 bins (OpenCV S in [0,256])
+        hist_scores = []
+        for c_idx, n_bins, val_range in [(0, 36, [0, 180]), (1, 32, [0, 256])]:
+            rend_hist = cv2.calcHist([rend_hsv], [c_idx], rend_mask_u8,
+                                    [n_bins], val_range)
+            ref_hist = cv2.calcHist([ref_hsv], [c_idx], ref_mask_u8,
+                                   [n_bins], val_range)
             cv2.normalize(rend_hist, rend_hist, alpha=1.0, beta=0.0,
                           norm_type=cv2.NORM_L1)
             cv2.normalize(ref_hist, ref_hist, alpha=1.0, beta=0.0,
                           norm_type=cv2.NORM_L1)
-            # Intersection: overlap of two distributions (0-1 range with L1 norm)
-            intersect = min(1.0, cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_INTERSECT))
-            # Bhattacharyya: 0=identical, higher=different
-            bhatt = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_BHATTACHARYYA)
-            bhatt_sim = max(0.0, 1.0 - bhatt)
-            # Blend intersection + Bhattacharyya
-            chroma_scores.append(0.5 * intersect + 0.5 * bhatt_sim)
+            # Correlation: 1.0=identical, -1=opposite, 0=independent
+            corr = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_CORREL)
+            hist_scores.append((corr + 1.0) / 2.0)  # remap [-1,1] → [0,1]
 
-        # Average a and b channel scores, clamp to [0, 1]
-        score = min(1.0, max(0.0, sum(chroma_scores) / len(chroma_scores)))
+        hist_score = sum(hist_scores) / len(hist_scores)
+
+        # Mean hue proximity (catches gross hue shifts)
+        # Use circular distance for hue (wraps at 180)
+        rend_hue = float(rend_hsv[:, :, 0][rend_mask].mean())
+        ref_hue = float(ref_hsv[:, :, 0][ref_mask].mean())
+        hue_diff = abs(rend_hue - ref_hue)
+        hue_diff = min(hue_diff, 180.0 - hue_diff)  # circular distance
+        hue_score = max(0.0, 1.0 - hue_diff / 45.0)  # 45° → 0
+
+        # Mean saturation proximity
+        rend_sat = float(rend_hsv[:, :, 1][rend_mask].mean())
+        ref_sat = float(ref_hsv[:, :, 1][ref_mask].mean())
+        sat_diff = abs(rend_sat - ref_sat)
+        sat_score = max(0.0, 1.0 - sat_diff / 80.0)  # 80 → 0
+
+        mean_score = 0.6 * hue_score + 0.4 * sat_score
+
+        score = min(1.0, 0.6 * hist_score + 0.4 * mean_score)
         return float(score * 100)
 
     # ─── B1. Mesh Integrity ───────────────────────────────────────────────
@@ -385,10 +399,10 @@ class QualityEvaluatorV4:
         except Exception:
             pass
 
-        # 3. Connected components (-5 max, log scale)
-        # FDG remesh + simplification naturally creates 10K-30K disconnected
-        # patches. This is purely cosmetic and irrelevant for WebGL rendering.
-        # Only penalize extreme fragmentation (>50K components).
+        # 3. Connected components (-3 max, log scale)
+        # UV parameterization duplicates vertices at seam boundaries,
+        # creating 20K-40K face-adjacency components from ~50 real components.
+        # This is normal for UV-mapped GLB. Only penalize extreme cases.
         try:
             nfaces = len(mesh.faces) if hasattr(mesh, 'faces') else 0
             if nfaces <= 500000:
@@ -399,12 +413,14 @@ class QualityEvaluatorV4:
                         (np.ones(len(adj)), (adj[:, 0], adj[:, 1])),
                         shape=(nfaces, nfaces)).tocsr()
                     n_components = sparse.csgraph.connected_components(graph, directed=False)[0]
-                    if n_components > 1000:
-                        # Log-scale penalty: 1000→0, 100000→5
+                    if n_components > 50000:
+                        # Penalty only for extreme fragmentation
                         log_comp = np.log10(n_components)
-                        pen = min(5, max(0, (log_comp - 3.0) * 2.5))
+                        pen = min(3, max(0, (log_comp - 4.7) * 5.0))
                         score -= pen
                         _penalties['components'] = (n_components, round(pen, 1))
+                    else:
+                        _penalties['components'] = (n_components, 0)
         except Exception:
             pass
 

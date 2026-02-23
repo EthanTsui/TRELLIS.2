@@ -179,8 +179,12 @@ class QualityVerifier:
 
         def _ensure_mask(m):
             """Ensure mask is 2D contiguous uint8 for cv2.calcHist."""
+            if hasattr(m, 'numpy'):  # PyTorch tensor
+                m = m.cpu().numpy()
+            m = np.asarray(m)
             if m.ndim == 3:
                 m = m[:, :, 0]
+            # Must be uint8, 2D, contiguous, non-boolean
             return np.ascontiguousarray(m.astype(np.uint8))
 
         def _score_view(render_rgb, alpha_mask):
@@ -491,7 +495,8 @@ class QualityVerifier:
             voxel_shape=mesh.voxel_shape,
             layout=mesh.layout,
         )
-        score_mesh.simplify(16777216)
+        # Quick simplify to 500K for fast rendering during candidate scoring
+        score_mesh.simplify(500000)
 
         renders = self.render_views(score_mesh, num_views, render_resolution)
 
