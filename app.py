@@ -683,7 +683,7 @@ def extract_glb(
         try:
             glb = silhouette_corrector.correct(
                 glb, ref_image,
-                yaw=0.0, pitch=0.25, r=2.0, fov=40.0,
+                yaw=0.0, pitch=0.25, r=None, fov=40.0,
                 num_steps=80,
                 verbose=True,
             )
@@ -797,7 +797,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                     tex_slat_heun_steps = gr.Slider(0, 8, label="Heun Steps (final)", value=4, step=1)
                 gr.Markdown("Frequency-Decoupled Guidance (FDG) — boost high-freq detail, reduce oversaturation")
                 with gr.Row():
-                    fdg_enabled = gr.Checkbox(label="Enable FDG (texture stage)", value=True)
+                    fdg_enabled = gr.Checkbox(label="Enable FDG (texture stage)", value=False)
                     fdg_lambda_low = gr.Slider(0.0, 2.0, label="FDG Low-Freq Weight", value=0.6, step=0.05)
                     fdg_lambda_high = gr.Slider(0.0, 3.0, label="FDG High-Freq Weight", value=1.3, step=0.05)
                 multistep = gr.Checkbox(label="AB2 Multistep (free 2nd-order accuracy)", value=True)
@@ -808,7 +808,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 with gr.Step("Preview", id=0):
                     preview_output = gr.HTML(empty_html, label="3D Asset Preview", show_label=True, container=True)
                     with gr.Row():
-                        enable_silhouette_correction = gr.Checkbox(label="Silhouette Correction", value=True)
+                        enable_silhouette_correction = gr.Checkbox(label="Silhouette Correction", value=False)
                         enable_texture_refinement = gr.Checkbox(label="Texture Refinement (render-and-compare)", value=True)
                         texture_refine_iters = gr.Slider(10, 100, label="Refinement Iterations", value=50, step=10)
                     extract_btn = gr.Button("Extract GLB")

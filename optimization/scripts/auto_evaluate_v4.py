@@ -1079,7 +1079,7 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
         try:
             glb = silhouette_corrector.correct(
                 glb, processed,
-                yaw=0.0, pitch=0.25, r=2.0, fov=40.0,
+                yaw=0.0, pitch=0.25, r=None, fov=40.0,
                 num_steps=80,
                 verbose=True,
             )
