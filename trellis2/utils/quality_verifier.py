@@ -44,7 +44,7 @@ class QualityVerifier:
         from .render_utils import yaw_pitch_r_fov_to_extrinsics_intrinsics, render_frames
         from ..renderers import EnvMap
 
-        pitches = [0.15, 0.30, 0.50]  # ~8.6°, ~17.2°, ~28.6° elevation
+        pitches = [0.15, 0.30, 0.50, 0.65]  # ~8.6°, ~17.2°, ~28.6°, ~37.3° elevation
         all_yaw, all_pitch = [], []
         for p in pitches:
             yaws = [i * 2 * np.pi / num_views for i in range(num_views)]

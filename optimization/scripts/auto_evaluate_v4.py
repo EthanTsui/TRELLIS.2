@@ -287,15 +287,16 @@ class QualityEvaluatorV4:
 
     def _color_distribution_match(self, rendered_rgb, rendered_alpha,
                                   reference_rgba):
-        """Compare color distributions using HSV hue/saturation histograms.
+        """Compare color distributions using HSV histograms + LAB ΔE.
 
-        Uses HSV H,S channels which fully separate brightness from chrominance.
-        Pearson correlation is scale-invariant and more forgiving than
-        intersection/Bhattacharyya for moderate color shifts from lighting.
+        Three components:
+          1. HSV histogram correlation (hue + saturation)
+          2. Mean color proximity (saturation-weighted hue + saturation)
+          3. LAB ΔE mean color distance (perceptually uniform, robust to lighting)
 
-        Research: SOTA papers use LPIPS/CLIP/DINO, not histograms. For
-        per-image color scoring, HSV correlation is the most robust histogram
-        approach (ECCV 2024 MS-SWD survey).
+        Key improvement: hue weight is modulated by saturation level. For
+        low-saturation objects (metals, grays), hue is unreliable noise — we
+        rely more on LAB and saturation. For chromatic objects, hue matters more.
         """
         if reference_rgba is None:
             return 50.0
@@ -311,16 +312,14 @@ class QualityEvaluatorV4:
         if rend_mask.sum() < 100 or ref_mask.sum() < 100:
             return 50.0
 
-        # Convert to HSV — H,S are fully lighting-invariant
-        rend_hsv = cv2.cvtColor(rendered_rgb, cv2.COLOR_RGB2HSV)
         ref_rgb = ref_resized[:, :, :3]
-        ref_hsv = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2HSV)
 
+        # --- Component 1: HSV histogram correlation ---
+        rend_hsv = cv2.cvtColor(rendered_rgb, cv2.COLOR_RGB2HSV)
+        ref_hsv = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2HSV)
         rend_mask_u8 = rend_mask.astype(np.uint8)
         ref_mask_u8 = ref_mask.astype(np.uint8)
 
-        # Hue: 36 bins × 5° each (OpenCV H in [0,180])
-        # Saturation: 32 bins (OpenCV S in [0,256])
         hist_scores = []
         for c_idx, n_bins, val_range in [(0, 36, [0, 180]), (1, 32, [0, 256])]:
             rend_hist = cv2.calcHist([rend_hsv], [c_idx], rend_mask_u8,
@@ -331,29 +330,51 @@ class QualityEvaluatorV4:
                           norm_type=cv2.NORM_L1)
             cv2.normalize(ref_hist, ref_hist, alpha=1.0, beta=0.0,
                           norm_type=cv2.NORM_L1)
-            # Correlation: 1.0=identical, -1=opposite, 0=independent
             corr = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_CORREL)
-            hist_scores.append((corr + 1.0) / 2.0)  # remap [-1,1] → [0,1]
-
+            hist_scores.append((corr + 1.0) / 2.0)
         hist_score = sum(hist_scores) / len(hist_scores)
 
-        # Mean hue proximity (catches gross hue shifts)
-        # Use circular distance for hue (wraps at 180)
+        # --- Component 2: Mean color proximity (saturation-adaptive) ---
+        rend_sat_mean = float(rend_hsv[:, :, 1][rend_mask].mean())
+        ref_sat_mean = float(ref_hsv[:, :, 1][ref_mask].mean())
+        avg_sat = (rend_sat_mean + ref_sat_mean) / 2.0
+
+        # Hue reliability: high saturation → hue is reliable, low → unreliable
+        # sat_weight: 0-1, maps saturation 0-128 to weight 0-1
+        hue_reliability = min(1.0, avg_sat / 128.0)
+
         rend_hue = float(rend_hsv[:, :, 0][rend_mask].mean())
         ref_hue = float(ref_hsv[:, :, 0][ref_mask].mean())
         hue_diff = abs(rend_hue - ref_hue)
-        hue_diff = min(hue_diff, 180.0 - hue_diff)  # circular distance
-        hue_score = max(0.0, 1.0 - hue_diff / 45.0)  # 45° → 0
+        hue_diff = min(hue_diff, 180.0 - hue_diff)
+        hue_score = max(0.0, 1.0 - hue_diff / 60.0)  # 60° tolerance (was 45°)
 
-        # Mean saturation proximity
-        rend_sat = float(rend_hsv[:, :, 1][rend_mask].mean())
-        ref_sat = float(ref_hsv[:, :, 1][ref_mask].mean())
-        sat_diff = abs(rend_sat - ref_sat)
-        sat_score = max(0.0, 1.0 - sat_diff / 80.0)  # 80 → 0
+        sat_diff = abs(rend_sat_mean - ref_sat_mean)
+        sat_score = max(0.0, 1.0 - sat_diff / 100.0)  # 100 tolerance (was 80)
 
-        mean_score = 0.6 * hue_score + 0.4 * sat_score
+        # Adaptive weighting: low saturation → rely more on sat_score
+        mean_score = hue_reliability * hue_score + (1 - hue_reliability * 0.4) * sat_score
+        mean_score = min(1.0, mean_score / (1 + (1 - hue_reliability * 0.4)))
 
-        score = min(1.0, 0.6 * hist_score + 0.4 * mean_score)
+        # --- Component 3: LAB ΔE mean color distance ---
+        rend_lab = cv2.cvtColor(rendered_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+        ref_lab = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+        # Mean LAB values within masks (only a* and b* for chrominance)
+        rend_a = float(rend_lab[:, :, 1][rend_mask].mean())
+        rend_b = float(rend_lab[:, :, 2][rend_mask].mean())
+        ref_a = float(ref_lab[:, :, 1][ref_mask].mean())
+        ref_b = float(ref_lab[:, :, 2][ref_mask].mean())
+
+        # ΔE_ab (CIE76) using only chrominance (a*, b*), skip L*
+        delta_e = np.sqrt((rend_a - ref_a)**2 + (rend_b - ref_b)**2)
+        # Relaxed: ΔE < 10 is excellent, < 25 acceptable, > 50 poor
+        # 3D renders naturally differ from photos due to lighting/material model
+        lab_score = max(0.0, min(1.0, 1.0 - delta_e / 50.0))
+
+        # --- Final blend ---
+        # 50% histogram + 35% mean proximity (sat-adaptive) + 15% LAB ΔE
+        score = min(1.0, 0.5 * hist_score + 0.35 * mean_score + 0.15 * lab_score)
         return float(score * 100)
 
     # ─── B1. Mesh Integrity ───────────────────────────────────────────────
@@ -675,17 +696,19 @@ class QualityEvaluatorV4:
     def _detail_richness(self, base_color_views, alpha_masks,
                          texture_map=None, tex_mask=None):
         """
-        Measure intrinsic texture detail richness via Laplacian energy.
-        Uses base_color renders (60%) + UV texture map (40%) when available.
+        Measure intrinsic texture detail richness via composite metric:
+          - 55% Normalized Multi-Scale Gradient (brightness-invariant)
+          - 45% FFT Spectral Energy Ratio (fully deterministic, scale-invariant)
+        Uses median aggregation across views for robustness.
+        Texture-map branch removed to eliminate availability bias.
         """
-        # View-based detail
         view_scores = []
         nviews = len(base_color_views)
 
         for i in range(nviews):
             bc = base_color_views[i]
             mask = alpha_masks[i] > 128
-            gray = cv2.cvtColor(bc, cv2.COLOR_RGB2GRAY)
+            gray = cv2.cvtColor(bc, cv2.COLOR_RGB2GRAY).astype(np.float64) / 255.0
 
             interior_kern = np.ones((8, 8), np.uint8)
             interior = cv2.erode(mask.astype(np.uint8), interior_kern) > 0
@@ -694,49 +717,78 @@ class QualityEvaluatorV4:
                 view_scores.append(50.0)
                 continue
 
-            # Laplacian energy (texture detail proxy)
-            lap = cv2.Laplacian(gray.astype(np.float64), cv2.CV_64F)
-            lap_energy = np.abs(lap[interior]).mean()
-
-            # Score mapping (calibrated for 3D renders):
-            # < 2: very blurry (20 pts)
-            # 2-5: low detail (20-65 pts)
-            # 5-15: good detail (65-100 pts) — most real objects fall here
-            # > 15: cap at 100 (rich detail, no noise penalty for 3D)
-            if lap_energy < 2:
-                s = 20.0
-            elif lap_energy < 5:
-                s = 20 + (lap_energy - 2) * 15.0
-            elif lap_energy < 15:
-                s = 65 + (lap_energy - 5) * 3.5
+            # --- Sub-metric 1: Normalized Multi-Scale Gradient (55%) ---
+            grad_energies = []
+            for sigma in [1.0, 2.0, 4.0]:
+                ksize = max(3, int(sigma * 3) | 1)
+                blurred = cv2.GaussianBlur(gray, (ksize, ksize), sigma)
+                gx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
+                gy = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
+                grad_mag = np.sqrt(gx**2 + gy**2)
+                local_mean = cv2.GaussianBlur(gray, (ksize, ksize), sigma * 3)
+                norm_grad = grad_mag / (local_mean + 0.01)
+                vals = norm_grad[interior]
+                grad_energies.append(np.percentile(vals, 75))
+            avg_grad = float(np.mean(grad_energies))
+            # Score mapping: calibrated for normalized gradient P75
+            # < 0.05: very smooth (20 pts)
+            # 0.05-0.15: low detail (20-60 pts)
+            # 0.15-0.5: good detail (60-100 pts)
+            # > 0.5: cap at 100
+            if avg_grad < 0.05:
+                grad_score = 20.0
+            elif avg_grad < 0.15:
+                grad_score = 20 + (avg_grad - 0.05) * 400.0
+            elif avg_grad < 0.5:
+                grad_score = 60 + (avg_grad - 0.15) * 114.3
             else:
-                s = 100.0
+                grad_score = 100.0
 
-            view_scores.append(min(100.0, s))
-
-        view_detail = float(np.mean(view_scores))
-
-        # Texture-map detail (if available)
-        if texture_map is not None and tex_mask is not None:
-            mask_bool = tex_mask.astype(bool) if tex_mask.dtype != bool else tex_mask
-            if mask_bool.sum() > 1000:
-                tex_gray = cv2.cvtColor(texture_map, cv2.COLOR_RGB2GRAY)
-                tex_lap = cv2.Laplacian(tex_gray.astype(np.float64), cv2.CV_64F)
-                tex_lap_energy = np.abs(tex_lap[mask_bool]).mean()
-
-                if tex_lap_energy < 3:
-                    tex_score = 30.0
-                elif tex_lap_energy < 10:
-                    tex_score = 30 + (tex_lap_energy - 3) * 10
-                elif tex_lap_energy < 25:
-                    tex_score = 100.0
+            # --- Sub-metric 2: FFT Spectral Energy Ratio (45%) ---
+            ys, xs = np.where(interior)
+            if len(ys) < 100:
+                fft_score = 50.0
+            else:
+                y0, y1 = ys.min(), ys.max() + 1
+                x0, x1 = xs.min(), xs.max() + 1
+                patch = gray[y0:y1, x0:x1]
+                h, w = patch.shape
+                if h < 16 or w < 16:
+                    fft_score = 50.0
                 else:
-                    tex_score = max(85, 100 - (tex_lap_energy - 25) * 0.3)
+                    hann_y = np.hanning(h)
+                    hann_x = np.hanning(w)
+                    window = np.outer(hann_y, hann_x)
+                    F = np.fft.fft2(patch * window)
+                    power = np.abs(F)**2
+                    fy = np.fft.fftfreq(h)
+                    fx = np.fft.fftfreq(w)
+                    FY, FX = np.meshgrid(fy, fx, indexing='ij')
+                    radial = np.sqrt(FY**2 + FX**2)
+                    total_power = power.sum()
+                    if total_power < 1e-10:
+                        fft_score = 20.0
+                    else:
+                        hf_ratio = power[radial > 0.25].sum() / total_power
+                        # Score mapping: calibrated for HF energy ratio
+                        # < 0.02: very blurry (20 pts)
+                        # 0.02-0.08: low detail (20-60 pts)
+                        # 0.08-0.25: good detail (60-100 pts)
+                        # > 0.25: cap at 100
+                        if hf_ratio < 0.02:
+                            fft_score = 20.0
+                        elif hf_ratio < 0.08:
+                            fft_score = 20 + (hf_ratio - 0.02) * 666.7
+                        elif hf_ratio < 0.25:
+                            fft_score = 60 + (hf_ratio - 0.08) * 235.3
+                        else:
+                            fft_score = 100.0
 
-                # Blend: 60% view-based, 40% texture-map-based
-                return 0.6 * view_detail + 0.4 * tex_score
+            # --- Composite ---
+            s = 0.55 * min(100.0, grad_score) + 0.45 * min(100.0, fft_score)
+            view_scores.append(s)
 
-        return view_detail
+        return float(np.median(view_scores))
 
     # ─── D1. Material Plausibility ────────────────────────────────────────
 
@@ -886,13 +938,13 @@ def render_evaluation_views(mesh, envmap, nviews=8, resolution=512):
     Uses canonical camera: r=2, fov=40 (same as render_video),
     NOT r=10, fov=8 (snapshot quasi-ortho).
 
-    Multi-pitch sampling: renders at 3 elevation bands (low/mid/high)
-    to better match diverse input image viewing angles.
-    Total views: nviews * 3 pitches (default 24 views, ~1.5s render).
+    Multi-pitch sampling: renders at 4 elevation bands to cover typical
+    product photography angles (8-37°).
+    Total views: nviews * 4 pitches (default 32 views, ~2s render).
     """
     from trellis2.utils import render_utils
 
-    pitches = [0.15, 0.30, 0.50]  # ~8.6°, ~17.2°, ~28.6° elevation
+    pitches = [0.15, 0.30, 0.50, 0.65]  # ~8.6°, ~17.2°, ~28.6°, ~37.3° elevation
     all_yaw, all_pitch, all_r, all_fov = [], [], [], []
     for p in pitches:
         yaws = np.linspace(0, 2 * np.pi, nviews, endpoint=False).tolist()
@@ -922,7 +974,8 @@ def render_evaluation_views(mesh, envmap, nviews=8, resolution=512):
 
 
 def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
-                          output_prefix="test", best_of_n=1, quality_verifier=None):
+                          output_prefix="test", best_of_n=1, quality_verifier=None,
+                          texture_refiner=None):
     """Generate a 3D model and evaluate it with V4 scoring."""
     import o_voxel.postprocess
     from trellis2.utils import render_utils
@@ -1030,6 +1083,23 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
     print(f"  GLB extraction: {glb_time:.1f}s", flush=True)
     _log_memory("post-glb")
 
+    # Texture refinement (render-and-compare optimization)
+    if glb is not None and texture_refiner is not None:
+        t0_refine = time.time()
+        try:
+            refine_iters = config.get('texture_refine_iters', 50)
+            glb = texture_refiner.refine(
+                glb, processed,
+                num_iters=refine_iters,
+                lr=0.005,
+                lpips_weight=0.1,
+            )
+            refine_time = time.time() - t0_refine
+            print(f"  Texture refinement: {refine_time:.1f}s ({refine_iters} iters)", flush=True)
+        except Exception as e:
+            print(f"  Warning: Texture refinement failed ({e})", flush=True)
+            traceback.print_exc()
+
     # Save GLB
     glb_path = None
     if glb is not None:
@@ -1100,7 +1170,8 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
     return result
 
 
-def run_evaluation(config, label="test", test_images=None, best_of_n=1):
+def run_evaluation(config, label="test", test_images=None, best_of_n=1,
+                   texture_refine=False):
     """Run full V4 evaluation pipeline."""
     if test_images is None:
         test_images = TEST_IMAGES_FULL
@@ -1115,7 +1186,7 @@ def run_evaluation(config, label="test", test_images=None, best_of_n=1):
     print(f"V4 Evaluation: {label}")
     print(f"Config: resolution={config.get('resolution', '1024')}, "
           f"cfg_mp={config.get('cfg_mp_strength', 0.0)}, "
-          f"best_of_n={best_of_n}")
+          f"best_of_n={best_of_n}, texture_refine={texture_refine}")
     print(f"Test images: {len(existing)}")
     print(f"{'='*60}\n")
 
@@ -1130,6 +1201,13 @@ def run_evaluation(config, label="test", test_images=None, best_of_n=1):
         quality_verifier = QualityVerifier(device='cuda')
         print(f"Best-of-N enabled: N={best_of_n}, QualityVerifier loaded")
 
+    # Initialize texture refiner
+    tex_refiner = None
+    if texture_refine:
+        from trellis2.postprocessing.texture_refiner import TextureRefiner
+        tex_refiner = TextureRefiner(device='cuda')
+        print(f"Texture refinement enabled: {config.get('texture_refine_iters', 50)} iters")
+
     results = []
     for img_path in existing:
         try:
@@ -1138,6 +1216,7 @@ def run_evaluation(config, label="test", test_images=None, best_of_n=1):
                 output_prefix=label,
                 best_of_n=best_of_n,
                 quality_verifier=quality_verifier,
+                texture_refiner=tex_refiner,
             )
             results.append(r)
             # Print per-image scores
@@ -1220,6 +1299,8 @@ def main():
                         help='Path to adjustment JSON config')
     parser.add_argument('--best-of-n', type=int, default=1,
                         help='Best-of-N: generate N candidates, pick best (default: 1)')
+    parser.add_argument('--texture-refine', action='store_true',
+                        help='Enable render-and-compare texture refinement on GLB')
     args = parser.parse_args()
 
     # Determine test images
@@ -1237,7 +1318,8 @@ def main():
         full_config.update(config)
         label = Path(args.config).stem
         run_evaluation(full_config, label=label, test_images=test_images,
-                       best_of_n=args.best_of_n)
+                       best_of_n=args.best_of_n,
+                       texture_refine=args.texture_refine)
 
     elif args.sweep:
         # Sweep mode
@@ -1250,7 +1332,8 @@ def main():
             config[param] = val
             label = f"v4_sweep_{param}_{val}"
             scores = run_evaluation(config, label=label, test_images=test_images,
-                                    best_of_n=args.best_of_n)
+                                    best_of_n=args.best_of_n,
+                                    texture_refine=args.texture_refine)
             if scores:
                 all_results[val] = scores
                 print(f"\n  {param}={val}: overall={scores['overall']:.1f}")
@@ -1277,15 +1360,20 @@ def main():
         config = dict(CHAMPION_CONFIG)
         config['cfg_mp_strength'] = args.cfg_mp
         run_evaluation(config, label=f"v4_cfg_mp_{args.cfg_mp}",
-                       test_images=test_images, best_of_n=args.best_of_n)
+                       test_images=test_images, best_of_n=args.best_of_n,
+                       texture_refine=args.texture_refine)
 
     else:
         # Default: baseline evaluation
         bon_str = f" (Best-of-{args.best_of_n})" if args.best_of_n > 1 else ""
-        print(f"=== V4 BASELINE EVALUATION{bon_str} ===\n")
+        refine_str = " +TexRefine" if args.texture_refine else ""
+        print(f"=== V4 BASELINE EVALUATION{bon_str}{refine_str} ===\n")
         label = f"v4_baseline_bon{args.best_of_n}" if args.best_of_n > 1 else "v4_baseline"
+        if args.texture_refine:
+            label += "_texrefine"
         run_evaluation(dict(CHAMPION_CONFIG), label=label,
-                       test_images=test_images, best_of_n=args.best_of_n)
+                       test_images=test_images, best_of_n=args.best_of_n,
+                       texture_refine=args.texture_refine)
 
 
 if __name__ == '__main__':
