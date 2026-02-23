@@ -153,17 +153,17 @@ class QualityVerifier:
         return float(np.mean(scores)) if scores else 0.5
 
     def compute_color_match(self, renders: Dict, reference_image) -> float:
-        """Compare color distributions in LAB space (A2-aligned metric).
+        """Compare color distributions in HSV space (A2-aligned metric).
 
-        Uses histogram correlation between best-matching rendered view and
-        reference image in LAB color space, matching V4's A2_color_dist methodology.
+        Uses HSV hue/saturation histograms with correlation, plus mean
+        chrominance proximity. Matches V4's A2_color_dist methodology exactly.
 
         Returns:
             Score in [0, 1] where 1 = identical color distribution.
         """
         import cv2
 
-        views = renders.get('shaded', renders.get('base_color', []))
+        views = renders.get('base_color', [])
         alphas = renders.get('alpha', [])
         if not views:
             return 0.5
@@ -179,12 +179,11 @@ class QualityVerifier:
 
         def _ensure_mask(m):
             """Ensure mask is 2D contiguous uint8 for cv2.calcHist."""
-            if hasattr(m, 'numpy'):  # PyTorch tensor
+            if hasattr(m, 'numpy'):
                 m = m.cpu().numpy()
             m = np.asarray(m)
             if m.ndim == 3:
                 m = m[:, :, 0]
-            # Must be uint8, 2D, contiguous, non-boolean
             return np.ascontiguousarray(m.astype(np.uint8))
 
         def _score_view(render_rgb, alpha_mask):
@@ -205,21 +204,40 @@ class QualityVerifier:
                 if rend_mask.sum() < 100 or ref_mask.sum() < 100:
                     return 0.0
 
-                # Ensure RGB (not RGBA) for cvtColor
+                rend_mask_bool = rend_mask > 0
+                ref_mask_bool = ref_mask > 0
+
+                # Convert to HSV (H,S are lighting-invariant)
                 rgb_3ch = render_rgb[:, :, :3] if render_rgb.shape[2] > 3 else render_rgb
-                rend_lab = cv2.cvtColor(np.ascontiguousarray(rgb_3ch), cv2.COLOR_RGB2LAB)
-                ref_lab = cv2.cvtColor(np.ascontiguousarray(ref_r[:, :, :3]), cv2.COLOR_RGB2LAB)
+                rend_hsv = cv2.cvtColor(np.ascontiguousarray(rgb_3ch), cv2.COLOR_RGB2HSV)
+                ref_hsv = cv2.cvtColor(np.ascontiguousarray(ref_r[:, :, :3]), cv2.COLOR_RGB2HSV)
 
-                corr_scores = []
-                for c in range(3):
-                    rend_hist = cv2.calcHist([rend_lab], [c], rend_mask, [32], [0, 256])
-                    ref_hist = cv2.calcHist([ref_lab], [c], ref_mask, [32], [0, 256])
-                    cv2.normalize(rend_hist, rend_hist)
-                    cv2.normalize(ref_hist, ref_hist)
+                # Hue (36 bins, [0,180]) + Saturation (32 bins, [0,256])
+                hist_scores = []
+                for c_idx, n_bins, val_range in [(0, 36, [0, 180]), (1, 32, [0, 256])]:
+                    rend_hist = cv2.calcHist([rend_hsv], [c_idx], rend_mask, [n_bins], val_range)
+                    ref_hist = cv2.calcHist([ref_hsv], [c_idx], ref_mask, [n_bins], val_range)
+                    cv2.normalize(rend_hist, rend_hist, alpha=1.0, beta=0.0, norm_type=cv2.NORM_L1)
+                    cv2.normalize(ref_hist, ref_hist, alpha=1.0, beta=0.0, norm_type=cv2.NORM_L1)
                     corr = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_CORREL)
-                    corr_scores.append(max(0.0, corr))
+                    hist_scores.append((corr + 1.0) / 2.0)
 
-                return 0.2 * corr_scores[0] + 0.4 * corr_scores[1] + 0.4 * corr_scores[2]
+                hist_score = sum(hist_scores) / len(hist_scores)
+
+                # Mean hue proximity (circular distance)
+                rend_hue = float(rend_hsv[:, :, 0][rend_mask_bool].mean())
+                ref_hue = float(ref_hsv[:, :, 0][ref_mask_bool].mean())
+                hue_diff = abs(rend_hue - ref_hue)
+                hue_diff = min(hue_diff, 180.0 - hue_diff)
+                hue_score = max(0.0, 1.0 - hue_diff / 45.0)
+
+                # Mean saturation proximity
+                rend_sat = float(rend_hsv[:, :, 1][rend_mask_bool].mean())
+                ref_sat = float(ref_hsv[:, :, 1][ref_mask_bool].mean())
+                sat_score = max(0.0, 1.0 - abs(rend_sat - ref_sat) / 80.0)
+
+                mean_score = 0.6 * hue_score + 0.4 * sat_score
+                return min(1.0, 0.6 * hist_score + 0.4 * mean_score)
             except Exception:
                 return 0.0
 
