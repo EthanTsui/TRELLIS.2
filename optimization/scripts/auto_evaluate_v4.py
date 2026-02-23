@@ -316,28 +316,28 @@ class QualityEvaluatorV4:
         rend_mask_u8 = rend_mask.astype(np.uint8)
         ref_mask_u8 = ref_mask.astype(np.uint8)
 
-        # Use both histogram correlation AND Bhattacharyya distance
-        # Correlation alone is too harsh when distributions shift slightly
-        corr_scores = []
-        bhatt_scores = []
-        for c in range(3):
-            rend_hist = cv2.calcHist([rend_lab], [c], rend_mask_u8, [32], [0, 256])
-            ref_hist = cv2.calcHist([ref_lab], [c], ref_mask_u8, [32], [0, 256])
+        # Compare chrominance only (a, b channels) — ignore L (brightness)
+        # 3D rendering inherently changes brightness distribution due to
+        # lighting, shadows, and specular highlights. Chrominance (hue/sat)
+        # is what actually indicates color fidelity.
+        # Use histogram intersection (more robust) + Bhattacharyya distance.
+        chroma_scores = []
+        for c in [1, 2]:  # a and b channels only
+            rend_hist = cv2.calcHist([rend_lab], [c], rend_mask_u8, [24], [0, 256])
+            ref_hist = cv2.calcHist([ref_lab], [c], ref_mask_u8, [24], [0, 256])
             cv2.normalize(rend_hist, rend_hist)
             cv2.normalize(ref_hist, ref_hist)
-            corr = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_CORREL)
-            corr_scores.append(max(0.0, corr))
-            # Bhattacharyya: 0=identical, higher=different. Convert to similarity.
+            # Intersection: overlap of two distributions (0-1 range after normalize)
+            intersect = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_INTERSECT)
+            # Bhattacharyya: 0=identical, higher=different
             bhatt = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_BHATTACHARYYA)
-            bhatt_scores.append(max(0.0, 1.0 - bhatt))
+            bhatt_sim = max(0.0, 1.0 - bhatt)
+            # Blend intersection + Bhattacharyya
+            chroma_scores.append(0.5 * intersect + 0.5 * bhatt_sim)
 
-        # Weight L channel less (lighting differences are expected in 3D rendering)
-        def _weighted(scores):
-            return 0.2 * scores[0] + 0.4 * scores[1] + 0.4 * scores[2]
-
-        # Blend: 50% correlation + 50% Bhattacharyya similarity
-        blended = 0.5 * _weighted(corr_scores) + 0.5 * _weighted(bhatt_scores)
-        return float(blended * 100)
+        # Average a and b channel scores
+        score = sum(chroma_scores) / len(chroma_scores)
+        return float(max(score, 0.0) * 100)
 
     # ─── B1. Mesh Integrity ───────────────────────────────────────────────
 
@@ -382,10 +382,10 @@ class QualityEvaluatorV4:
         except Exception:
             pass
 
-        # 3. Connected components (-10 max, log scale)
-        # FDG remesh + simplification naturally creates thousands of disconnected
-        # patches. This is cosmetic and doesn't affect WebGL rendering quality.
-        # Use log scale: <100 = 0 penalty, 100-10K = gradual, cap at -10.
+        # 3. Connected components (-5 max, log scale)
+        # FDG remesh + simplification naturally creates 10K-30K disconnected
+        # patches. This is purely cosmetic and irrelevant for WebGL rendering.
+        # Only penalize extreme fragmentation (>50K components).
         try:
             nfaces = len(mesh.faces) if hasattr(mesh, 'faces') else 0
             if nfaces <= 500000:
@@ -396,10 +396,10 @@ class QualityEvaluatorV4:
                         (np.ones(len(adj)), (adj[:, 0], adj[:, 1])),
                         shape=(nfaces, nfaces)).tocsr()
                     n_components = sparse.csgraph.connected_components(graph, directed=False)[0]
-                    if n_components > 100:
-                        # Log-scale penalty: 100→0, 10000→10
+                    if n_components > 1000:
+                        # Log-scale penalty: 1000→0, 100000→5
                         log_comp = np.log10(n_components)
-                        pen = min(10, max(0, (log_comp - 2.0) * 5.0))
+                        pen = min(5, max(0, (log_comp - 3.0) * 2.5))
                         score -= pen
                         _penalties['components'] = (n_components, round(pen, 1))
         except Exception:

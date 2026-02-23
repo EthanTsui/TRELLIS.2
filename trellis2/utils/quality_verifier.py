@@ -13,49 +13,29 @@ from typing import Dict, Optional, Union
 
 
 class QualityVerifier:
-    """Multi-view quality scoring for Best-of-N selection.
+    """V4-aligned quality scoring for Best-of-N candidate selection.
 
     Scores a generated mesh against the input reference image using:
-    - LPIPS perceptual distance (front view vs reference)
-    - DreamSim perceptual distance (optional, if installed)
-    - Geometric quality heuristics (face count, degeneracy, aspect ratio)
-    - Color richness across multiple views (penalizes grey/monochrome)
+    - Silhouette Dice (A1-aligned: scale-invariant, best-view)
+    - LAB color histogram (A2-aligned: best-view, L weighted low)
+    - Geometric quality (B1-aligned: log-scale component penalty)
+    - Texture coherence (C1-aligned: crack + gradient detection)
+    - Color richness (C2-aligned: chroma coverage)
+    - Detail richness (C3-aligned: Laplacian energy)
     """
 
     def __init__(self, device: str = 'cuda'):
         self.device = device
-        self._lpips_fn = None
-        self._dreamsim_model = None
-        self._dreamsim_preprocess = None
-
-    @torch.no_grad()
-    def _get_lpips(self):
-        """Lazy-load LPIPS model."""
-        if self._lpips_fn is None:
-            import lpips
-            self._lpips_fn = lpips.LPIPS(net='alex').to(self.device).eval()
-        return self._lpips_fn
-
-    @torch.no_grad()
-    def _get_dreamsim(self):
-        """Lazy-load DreamSim model. Returns (None, None) if not installed."""
-        if self._dreamsim_model is None:
-            try:
-                from dreamsim import dreamsim
-                self._dreamsim_model, self._dreamsim_preprocess = dreamsim(
-                    pretrained=True, device=self.device
-                )
-                self._dreamsim_model.eval()
-            except ImportError:
-                return None, None
-        return self._dreamsim_model, self._dreamsim_preprocess
 
     def render_views(self, mesh, num_views: int = 6, resolution: int = 512) -> Dict:
         """Render multi-view images of the mesh.
 
+        Uses multi-pitch sampling (3 elevations) for better coverage of diverse
+        input image viewing angles, matching the V4 evaluator.
+
         Args:
             mesh: MeshWithVoxel or renderable mesh object.
-            num_views: Number of evenly-spaced azimuth views.
+            num_views: Number of evenly-spaced azimuth views PER PITCH.
             resolution: Render resolution.
 
         Returns:
@@ -64,12 +44,16 @@ class QualityVerifier:
         from .render_utils import yaw_pitch_r_fov_to_extrinsics_intrinsics, render_frames
         from ..renderers import EnvMap
 
-        yaws = [i * 2 * np.pi / num_views for i in range(num_views)]
-        pitchs = [0.25] * num_views  # slightly elevated
+        pitches = [0.15, 0.30, 0.50]  # ~8.6°, ~17.2°, ~28.6° elevation
+        all_yaw, all_pitch = [], []
+        for p in pitches:
+            yaws = [i * 2 * np.pi / num_views for i in range(num_views)]
+            all_yaw.extend(yaws)
+            all_pitch.extend([p] * num_views)
+
         extrinsics, intrinsics = yaw_pitch_r_fov_to_extrinsics_intrinsics(
-            yaws, pitchs, 2, 40
+            all_yaw, all_pitch, 2, 40
         )
-        # PbrMeshRenderer.render() requires an envmap; use a plain white one
         envmap = EnvMap(torch.ones(16, 32, 3, device=self.device))
         return render_frames(
             mesh, extrinsics, intrinsics,
@@ -77,76 +61,6 @@ class QualityVerifier:
             verbose=False,
             envmap=envmap,
         )
-
-    def _image_to_lpips_tensor(self, img, size: int = 224) -> torch.Tensor:
-        """Convert image to LPIPS-compatible tensor: [1, 3, H, W] in [-1, 1]."""
-        if isinstance(img, Image.Image):
-            if img.mode == 'RGBA':
-                bg = Image.new('RGB', img.size, (0, 0, 0))
-                bg.paste(img, mask=img.split()[3])
-                img = bg
-            img = img.convert('RGB').resize((size, size), Image.LANCZOS)
-            arr = np.array(img).astype(np.float32) / 255.0
-        elif isinstance(img, np.ndarray):
-            arr = img.astype(np.float32)
-            if arr.max() > 1.0:
-                arr = arr / 255.0
-            pil = Image.fromarray((np.clip(arr, 0, 1) * 255).astype(np.uint8))
-            pil = pil.resize((size, size), Image.LANCZOS)
-            arr = np.array(pil).astype(np.float32) / 255.0
-        else:
-            raise ValueError(f"Unsupported image type: {type(img)}")
-
-        tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
-        tensor = tensor * 2.0 - 1.0  # [0,1] -> [-1,1]
-        return tensor.to(self.device)
-
-    @torch.no_grad()
-    def compute_lpips(self, render, reference) -> float:
-        """Compute LPIPS perceptual similarity (higher = more similar).
-
-        Args:
-            render: Rendered view (numpy uint8 or PIL Image).
-            reference: Reference input image (PIL RGBA or numpy).
-
-        Returns:
-            Score in [0, 1] where 1 = identical.
-        """
-        lpips_fn = self._get_lpips()
-        render_t = self._image_to_lpips_tensor(render)
-        ref_t = self._image_to_lpips_tensor(reference)
-        dist = lpips_fn(render_t, ref_t).item()
-        return max(0.0, 1.0 - dist)
-
-    @torch.no_grad()
-    def compute_dreamsim(self, render, reference) -> Optional[float]:
-        """Compute DreamSim perceptual similarity (higher = more similar).
-
-        Returns None if DreamSim is not installed.
-        """
-        model, preprocess = self._get_dreamsim()
-        if model is None:
-            return None
-
-        if isinstance(render, np.ndarray):
-            render = Image.fromarray(render)
-        if isinstance(reference, np.ndarray):
-            reference = Image.fromarray(np.clip(reference, 0, 255).astype(np.uint8))
-
-        # Composite RGBA on black background
-        if hasattr(render, 'mode') and render.mode == 'RGBA':
-            bg = Image.new('RGB', render.size, (0, 0, 0))
-            bg.paste(render, mask=render.split()[3])
-            render = bg
-        if hasattr(reference, 'mode') and reference.mode == 'RGBA':
-            bg = Image.new('RGB', reference.size, (0, 0, 0))
-            bg.paste(reference, mask=reference.split()[3])
-            reference = bg
-
-        render_t = preprocess(render.convert('RGB')).to(self.device)
-        ref_t = preprocess(reference.convert('RGB')).to(self.device)
-        dist = model(render_t, ref_t).item()
-        return max(0.0, 1.0 - dist)
 
     def compute_geometric_score(self, mesh) -> float:
         """Score geometric quality of the mesh.
@@ -187,23 +101,25 @@ class QualityVerifier:
             if aspect > 10:
                 score *= 0.7
 
-        # Connected components via vertex adjacency graph — fast O(V+F)
+        # Connected components — TRELLIS.2 FDG meshing produces 1000s of tiny
+        # fragments; this is normal. Use log-scale penalty matching V4 B1.
+        # Only penalize if face count is low (decimation didn't remove fragments).
         try:
-            from scipy import sparse
-            faces_np = mesh.faces.cpu().numpy()
-            # Build vertex adjacency graph from triangle edges
-            v0, v1, v2 = faces_np[:, 0], faces_np[:, 1], faces_np[:, 2]
-            rows = np.concatenate([v0, v1, v2, v1, v2, v0])
-            cols = np.concatenate([v1, v2, v0, v0, v1, v2])
-            graph = sparse.coo_matrix(
-                (np.ones(len(rows), dtype=np.float32), (rows, cols)),
-                shape=(n_verts, n_verts)
-            ).tocsr()
-            n_components = sparse.csgraph.connected_components(graph, directed=False)[0]
-            if n_components > 1:
-                # Harsh penalty: fragmented mesh is unusable
-                # 2 components -> 0.3, 5+ -> 0.1
-                score *= max(0.1, 0.5 / n_components)
+            if n_faces < 500000:  # Only check if mesh is small enough to matter
+                from scipy import sparse
+                faces_np = mesh.faces.cpu().numpy()
+                v0, v1, v2 = faces_np[:, 0], faces_np[:, 1], faces_np[:, 2]
+                rows = np.concatenate([v0, v1, v2, v1, v2, v0])
+                cols = np.concatenate([v1, v2, v0, v0, v1, v2])
+                graph = sparse.coo_matrix(
+                    (np.ones(len(rows), dtype=np.float32), (rows, cols)),
+                    shape=(n_verts, n_verts)
+                ).tocsr()
+                n_components = sparse.csgraph.connected_components(graph, directed=False)[0]
+                if n_components > 100:
+                    # Log-scale: 100→1.0, 1000→0.9, 10000→0.8, 100000→0.7
+                    log_penalty = max(0.0, (np.log10(n_components) - 2) * 0.1)
+                    score *= max(0.5, 1.0 - log_penalty)
         except Exception:
             pass
 
@@ -239,19 +155,18 @@ class QualityVerifier:
     def compute_color_match(self, renders: Dict, reference_image) -> float:
         """Compare color distributions in LAB space (A2-aligned metric).
 
-        Uses histogram correlation between rendered front view and reference
-        image in LAB color space, matching V4's A2_color_dist methodology.
+        Uses histogram correlation between best-matching rendered view and
+        reference image in LAB color space, matching V4's A2_color_dist methodology.
 
         Returns:
             Score in [0, 1] where 1 = identical color distribution.
         """
         import cv2
 
-        if 'base_color' not in renders or len(renders['base_color']) == 0:
+        views = renders.get('shaded', renders.get('base_color', []))
+        alphas = renders.get('alpha', [])
+        if not views:
             return 0.5
-
-        front_render = renders['base_color'][0]  # [H, W, 3] uint8 RGB
-        alpha = renders.get('alpha', [None])[0]
 
         # Prepare reference
         if isinstance(reference_image, Image.Image):
@@ -262,43 +177,57 @@ class QualityVerifier:
         else:
             return 0.5
 
-        h, w = front_render.shape[:2]
-        if ref_np.shape[:2] != (h, w):
-            ref_np = cv2.resize(ref_np, (w, h))
+        def _ensure_mask(m):
+            """Ensure mask is 2D contiguous uint8 for cv2.calcHist."""
+            if m.ndim == 3:
+                m = m[:, :, 0]
+            return np.ascontiguousarray(m.astype(np.uint8))
 
-        # Masks
-        if alpha is not None:
-            rend_mask = (alpha > 128).astype(np.uint8)
-        else:
-            gray = cv2.cvtColor(front_render, cv2.COLOR_RGB2GRAY)
-            rend_mask = (gray > 5).astype(np.uint8)
+        def _score_view(render_rgb, alpha_mask):
+            try:
+                h, w = render_rgb.shape[:2]
+                ref_r = ref_np
+                if ref_np.shape[:2] != (h, w):
+                    ref_r = cv2.resize(ref_np, (w, h))
 
-        if ref_np.shape[2] == 4:
-            ref_mask = (ref_np[:, :, 3] > 128).astype(np.uint8)
-        else:
-            ref_mask = np.ones((h, w), dtype=np.uint8)
+                if alpha_mask is not None:
+                    rend_mask = _ensure_mask(alpha_mask > 128)
+                else:
+                    gray = cv2.cvtColor(render_rgb[:, :, :3], cv2.COLOR_RGB2GRAY)
+                    rend_mask = _ensure_mask(gray > 5)
 
-        if rend_mask.sum() < 100 or ref_mask.sum() < 100:
-            return 0.5
+                ref_mask = _ensure_mask(ref_r[:, :, 3] > 128) if ref_r.shape[2] >= 4 else np.ones((h, w), dtype=np.uint8)
 
-        # Convert to LAB
-        rend_lab = cv2.cvtColor(front_render, cv2.COLOR_RGB2LAB)
-        ref_rgb = ref_np[:, :, :3]
-        ref_lab = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2LAB)
+                if rend_mask.sum() < 100 or ref_mask.sum() < 100:
+                    return 0.0
 
-        # Histogram correlation (A and B channels weighted higher)
-        corr_scores = []
-        for c in range(3):
-            rend_hist = cv2.calcHist([rend_lab], [c], rend_mask, [32], [0, 256])
-            ref_hist = cv2.calcHist([ref_lab], [c], ref_mask, [32], [0, 256])
-            cv2.normalize(rend_hist, rend_hist)
-            cv2.normalize(ref_hist, ref_hist)
-            corr = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_CORREL)
-            corr_scores.append(max(0.0, corr))
+                # Ensure RGB (not RGBA) for cvtColor
+                rgb_3ch = render_rgb[:, :, :3] if render_rgb.shape[2] > 3 else render_rgb
+                rend_lab = cv2.cvtColor(np.ascontiguousarray(rgb_3ch), cv2.COLOR_RGB2LAB)
+                ref_lab = cv2.cvtColor(np.ascontiguousarray(ref_r[:, :, :3]), cv2.COLOR_RGB2LAB)
 
-        # Weight: L=0.2, A=0.4, B=0.4 (lighting less important)
-        weighted = 0.2 * corr_scores[0] + 0.4 * corr_scores[1] + 0.4 * corr_scores[2]
-        return float(weighted)
+                corr_scores = []
+                for c in range(3):
+                    rend_hist = cv2.calcHist([rend_lab], [c], rend_mask, [32], [0, 256])
+                    ref_hist = cv2.calcHist([ref_lab], [c], ref_mask, [32], [0, 256])
+                    cv2.normalize(rend_hist, rend_hist)
+                    cv2.normalize(ref_hist, ref_hist)
+                    corr = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_CORREL)
+                    corr_scores.append(max(0.0, corr))
+
+                return 0.2 * corr_scores[0] + 0.4 * corr_scores[1] + 0.4 * corr_scores[2]
+            except Exception:
+                return 0.0
+
+        # Best-matching view (matches V4 A2 behavior)
+        best = 0.0
+        for i, view in enumerate(views):
+            am = alphas[i] if i < len(alphas) else None
+            if am is not None and am.ndim == 3:
+                am = am[:, :, 0]
+            best = max(best, _score_view(view, am))
+
+        return float(best)
 
     @torch.no_grad()
     def compute_depth_consistency(
@@ -608,13 +537,5 @@ class QualityVerifier:
         return result
 
     def cleanup(self):
-        """Release model memory."""
-        if self._lpips_fn is not None:
-            del self._lpips_fn
-            self._lpips_fn = None
-        if self._dreamsim_model is not None:
-            del self._dreamsim_model
-            del self._dreamsim_preprocess
-            self._dreamsim_model = None
-            self._dreamsim_preprocess = None
+        """Release GPU memory."""
         torch.cuda.empty_cache()
