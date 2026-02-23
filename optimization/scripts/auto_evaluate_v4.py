@@ -89,6 +89,10 @@ CHAMPION_CONFIG = {
     'schedule': 'uniform',
     'schedule_rho': 7.0,
     'schedule_power': 2.0,
+    # Bell-shaped guidance schedule for texture (validated +0.7 overall)
+    'tex_guidance_schedule': 'beta',
+    'tex_guidance_beta_a': 3.0,
+    'tex_guidance_beta_b': 3.0,
     'resolution': '1024',
     'seed': 42,
     'decimation_target': 500000,
@@ -1089,6 +1093,7 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
                 "guidance_schedule": config.get('ss_guidance_schedule', 'binary'),
                 "guidance_beta_a": config.get('ss_guidance_beta_a', 2.0),
                 "guidance_beta_b": config.get('ss_guidance_beta_b', 5.0),
+                "occupancy_threshold": config.get('ss_occupancy_threshold', 0.0),
             },
             shape_slat_sampler_params={
                 "steps": config['shape_slat_sampling_steps'],
@@ -1117,6 +1122,13 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
                 "guidance_interval": tuple(config.get('tex_guidance_interval', (0.0, 1.0))),
                 "guidance_anneal_min": config.get('tex_guidance_anneal_min', 0.0),
                 "guidance_anneal_start": config.get('tex_guidance_anneal_start', 0.3),
+                "sde_alpha": config.get('tex_sde_alpha', config.get('sde_alpha', 0.0)),
+                "sde_profile": config.get('tex_sde_profile', config.get('sde_profile', 'zero_ends')),
+                # FDG: Frequency-Decoupled Guidance (stage 3 texture only)
+                "cfg_mode": config.get('tex_cfg_mode', config.get('cfg_mode', 'standard')),
+                "fdg_sigma": config.get('tex_fdg_sigma', config.get('fdg_sigma', 1.0)),
+                "fdg_lambda_low": config.get('tex_fdg_lambda_low', config.get('fdg_lambda_low', 0.6)),
+                "fdg_lambda_high": config.get('tex_fdg_lambda_high', config.get('fdg_lambda_high', 1.3)),
             },
             pipeline_type={
                 "512": "512", "1024": "1024_cascade", "1536": "1536_cascade",
@@ -1137,6 +1149,8 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
                 "schedule": config.get('ss_schedule', config.get('schedule', 'uniform')),
                 "schedule_rho": config.get('schedule_rho', 7.0),
                 "schedule_power": config.get('ss_schedule_power', config.get('schedule_power', 2.0)),
+                # Occupancy threshold for sparse structure (0.0 default, higher=tighter silhouette)
+                "occupancy_threshold": config.get('ss_occupancy_threshold', 0.0),
                 # Guidance schedule for SS stage
                 "guidance_schedule": config.get('ss_guidance_schedule', 'binary'),
                 "guidance_beta_a": config.get('ss_guidance_beta_a', 2.0),
@@ -1177,6 +1191,14 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
                 # Guidance anneal: reduce guidance near t=0 to preserve fine detail
                 "guidance_anneal_min": config.get('tex_guidance_anneal_min', 0.0),
                 "guidance_anneal_start": config.get('tex_guidance_anneal_start', 0.3),
+                # Stochastic SDE sampling
+                "sde_alpha": config.get('tex_sde_alpha', config.get('sde_alpha', 0.0)),
+                "sde_profile": config.get('tex_sde_profile', config.get('sde_profile', 'zero_ends')),
+                # FDG: Frequency-Decoupled Guidance (stage 3 texture only)
+                "cfg_mode": config.get('tex_cfg_mode', config.get('cfg_mode', 'standard')),
+                "fdg_sigma": config.get('tex_fdg_sigma', config.get('fdg_sigma', 1.0)),
+                "fdg_lambda_low": config.get('tex_fdg_lambda_low', config.get('fdg_lambda_low', 0.6)),
+                "fdg_lambda_high": config.get('tex_fdg_lambda_high', config.get('fdg_lambda_high', 1.3)),
             },
             pipeline_type={
                 "512": "512", "1024": "1024_cascade", "1536": "1536_cascade",

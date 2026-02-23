@@ -180,6 +180,10 @@ class FlowEulerSampler(Sampler):
         # guidance_anneal_min = minimum fraction of guidance at t=0 (0=off, 0.25=reduce to 25%)
         guidance_anneal_min = kwargs.pop('guidance_anneal_min', 0.0)
         guidance_anneal_start = kwargs.pop('guidance_anneal_start', 0.3)
+        # Stochastic SDE: convert ODE to SDE with controlled noise injection
+        # sde_alpha = 0 (off, pure ODE), 0.1-0.5 recommended for diversity/detail
+        sde_alpha = kwargs.pop('sde_alpha', 0.0)
+        sde_profile = kwargs.pop('sde_profile', 'zero_ends')  # 'zero_ends' or 'sqrt_t'
 
         sample = noise
         t_seq = build_timestep_schedule(
@@ -236,6 +240,28 @@ class FlowEulerSampler(Sampler):
                 coeff_x0 = (1 - t_prev) - (1 - t) * ratio
                 x_manifold = ratio * sample + coeff_x0 * cond_x_0
                 out.pred_x_prev = out.pred_x_prev + cfg_mp_strength * (x_manifold - out.pred_x_prev)
+            # Stochastic SDE noise injection: adds diversity and can improve detail
+            # Only inject noise at intermediate steps (not the final step to t≈0)
+            if sde_alpha > 0 and t_prev > 1e-3:
+                # Compute score function: ∇log p_t(x) ≈ -eps / σ(t)
+                sigma_t = self.sigma_min + (1 - self.sigma_min) * t
+                pred_eps = self._xstart_to_eps(sample, t, out.pred_x_0)
+                score = -pred_eps / sigma_t
+                # Diffusion coefficient g̃(t)
+                if sde_profile == 'zero_ends':
+                    g_tilde = sde_alpha * np.sqrt(max(t * (1 - t), 0))
+                else:  # sqrt_t
+                    g_tilde = sde_alpha * np.sqrt(max(t, 0))
+                abs_dt = abs(dt)
+                # SDE: drift correction + noise injection
+                # Drift: -½g̃²·score·dt (Stochastic Interpolants, Albergo et al.)
+                out.pred_x_prev = out.pred_x_prev - 0.5 * g_tilde**2 * score * dt
+                # Noise: g̃·√dt·z — handle SparseTensor (has .feats/.replace)
+                if hasattr(out.pred_x_prev, 'replace') and hasattr(out.pred_x_prev, 'feats'):
+                    noise = out.pred_x_prev.replace(torch.randn_like(out.pred_x_prev.feats))
+                else:
+                    noise = torch.randn_like(out.pred_x_prev)
+                out.pred_x_prev = out.pred_x_prev + g_tilde * np.sqrt(abs_dt) * noise
             sample = out.pred_x_prev
             ret.pred_x_t.append(out.pred_x_prev)
             ret.pred_x_0.append(out.pred_x_0)

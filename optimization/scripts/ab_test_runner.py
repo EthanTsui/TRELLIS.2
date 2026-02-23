@@ -232,6 +232,81 @@ PRESETS = {
         'sc_aggressive': {'enable_silcorr': True, 'silcorr_w_lap': 5.0, 'silcorr_max_disp': 0.08},
         'sc_conservative': {'enable_silcorr': True, 'silcorr_w_lap': 20.0, 'silcorr_max_disp': 0.04, 'silcorr_dice': False},  # closer to old but with multires
     },
+    # Occupancy threshold: tighten/loosen sparse structure for A1 silhouette
+    'occ_threshold': {
+        'occ_baseline':  {},  # threshold=0.0 (default)
+        'occ_tight_05':  {'ss_occupancy_threshold': 0.5},   # tighter silhouette
+        'occ_tight_10':  {'ss_occupancy_threshold': 1.0},   # much tighter
+        'occ_loose_m05': {'ss_occupancy_threshold': -0.5},  # looser (recover thin features)
+    },
+    # Stochastic SDE sampling: convert ODE to SDE for diversity + detail
+    # sde_alpha controls noise injection strength; 0=pure ODE
+    'sde_sampling': {
+        'sde_baseline': {},  # pure ODE (sde_alpha=0)
+        'sde_ze_01':    {'tex_sde_alpha': 0.1, 'tex_sde_profile': 'zero_ends'},
+        'sde_ze_02':    {'tex_sde_alpha': 0.2, 'tex_sde_profile': 'zero_ends'},
+        'sde_ze_03':    {'tex_sde_alpha': 0.3, 'tex_sde_profile': 'zero_ends'},
+        'sde_sqrt_02':  {'tex_sde_alpha': 0.2, 'tex_sde_profile': 'sqrt_t'},
+    },
+    # FDG: Frequency-Decoupled Guidance for texture stage
+    # Boosts high-freq detail while dampening low-freq oversaturation
+    'fdg': {
+        'fdg_baseline': {},  # standard CFG (no FDG)
+        'fdg_default':  {'tex_cfg_mode': 'fdg', 'tex_fdg_sigma': 1.0, 'tex_fdg_lambda_low': 0.6, 'tex_fdg_lambda_high': 1.3},
+        'fdg_hi15':     {'tex_cfg_mode': 'fdg', 'tex_fdg_sigma': 1.0, 'tex_fdg_lambda_low': 0.5, 'tex_fdg_lambda_high': 1.5},
+        'fdg_hi20':     {'tex_cfg_mode': 'fdg', 'tex_fdg_sigma': 1.0, 'tex_fdg_lambda_low': 0.4, 'tex_fdg_lambda_high': 2.0},
+    },
+    # FDG + sigma sweep (detail at different spatial scales)
+    'fdg_sigma': {
+        'fdgs_baseline': {},
+        'fdgs_s05':     {'tex_cfg_mode': 'fdg', 'tex_fdg_sigma': 0.5, 'tex_fdg_lambda_low': 0.5, 'tex_fdg_lambda_high': 1.5},
+        'fdgs_s10':     {'tex_cfg_mode': 'fdg', 'tex_fdg_sigma': 1.0, 'tex_fdg_lambda_low': 0.5, 'tex_fdg_lambda_high': 1.5},
+        'fdgs_s20':     {'tex_cfg_mode': 'fdg', 'tex_fdg_sigma': 2.0, 'tex_fdg_lambda_low': 0.5, 'tex_fdg_lambda_high': 1.5},
+    },
+    # Decimation target: higher → more faces → more geometric detail
+    'decimation': {
+        'dec_500k':  {},  # baseline (500K)
+        'dec_800k':  {'decimation_target': 800000},
+        'dec_1200k': {'decimation_target': 1200000},
+    },
+    # BON4 + best guidance configs: combine staged Best-of-N with best findings
+    # Standard BON4 gave 93.34. Beta(3,3) gave 92.66. Potentially additive.
+    'bon4_combined': {
+        'b4_baseline':  {'staged_bon': 4},  # staged BON4 alone
+        'b4_beta33':    {'staged_bon': 4,   # BON4 + bell-curve guidance
+                         'tex_guidance_schedule': 'beta',
+                         'tex_guidance_beta_a': 3.0,
+                         'tex_guidance_beta_b': 3.0},
+        'b4_narrow':    {'staged_bon': 4,   # BON4 + narrow interval
+                         'tex_guidance_interval': (0.05, 0.85)},
+    },
+    # Shape guidance schedule for improving A1 silhouette
+    # A1 is the largest weighted gap (81.4/100, weight 15)
+    'shape_gs_combined': {
+        'sgc_baseline':    {},  # constant guidance all stages
+        'sgc_shape_bell':  {   # bell-curve for shape stage only
+            'shape_guidance_schedule': 'beta',
+            'shape_guidance_beta_a': 3.0,
+            'shape_guidance_beta_b': 3.0,
+        },
+        'sgc_all_bell':    {   # bell-curve for ALL stages
+            'shape_guidance_schedule': 'beta',
+            'shape_guidance_beta_a': 3.0,
+            'shape_guidance_beta_b': 3.0,
+            'tex_guidance_schedule': 'beta',
+            'tex_guidance_beta_a': 3.0,
+            'tex_guidance_beta_b': 3.0,
+        },
+        'sgc_all_bell_bon4': {  # bell-curve ALL + BON4
+            'staged_bon': 4,
+            'shape_guidance_schedule': 'beta',
+            'shape_guidance_beta_a': 3.0,
+            'shape_guidance_beta_b': 3.0,
+            'tex_guidance_schedule': 'beta',
+            'tex_guidance_beta_a': 3.0,
+            'tex_guidance_beta_b': 3.0,
+        },
+    },
     'all': {},  # Combines all presets
 }
 

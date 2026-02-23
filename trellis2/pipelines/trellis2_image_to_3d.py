@@ -659,6 +659,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sampler_params: dict = {},
         hull_mask: torch.Tensor = None,
         max_removal_ratio: float = 0.3,
+        occupancy_threshold: float = 0.0,
     ) -> torch.Tensor:
         """
         Sample sparse structures with the given conditioning.
@@ -670,6 +671,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             sampler_params (dict): Additional parameters for the sampler.
             hull_mask (torch.Tensor): Optional visual hull mask [1, 1, R, R, R] bool.
             max_removal_ratio (float): Safety cap on fraction of voxels hull can remove.
+            occupancy_threshold (float): Threshold for occupancy (0.0 default, higher=tighter silhouette).
         """
         # Sample sparse structure latent
         flow_model = self.models['sparse_structure_flow_model']
@@ -677,6 +679,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         in_channels = flow_model.in_channels
         noise = torch.randn(num_samples, in_channels, reso, reso, reso).to(self.device)
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
+        # Pop pipeline-level params before passing to sampler
+        occupancy_threshold = sampler_params.pop('occupancy_threshold', occupancy_threshold)
         if self.low_vram:
             flow_model.to(self.device)
         z_s = self.sparse_structure_sampler.sample(
@@ -694,7 +698,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         decoder = self.models['sparse_structure_decoder']
         if self.low_vram:
             decoder.to(self.device)
-        decoded = decoder(z_s)>0
+        decoded = decoder(z_s) > occupancy_threshold
         if self.low_vram:
             decoder.cpu()
         if resolution != decoded.shape[2]:
