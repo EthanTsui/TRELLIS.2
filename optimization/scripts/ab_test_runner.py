@@ -283,7 +283,7 @@ PRESETS = {
     # Mesh quality: remesh, projection, fragment cleanup
     # FDG analysis (agent aa8867c) found remesh discards learned sub-voxel offsets
     'mesh_quality': {
-        'mq_baseline':   {},  # remesh=True, project=0.9, frag=50 (current)
+        'mq_baseline':   {},  # remesh=True, project=0.9, frag=0 (disabled)
         'mq_proj098':    {'remesh_project': 0.98},  # closer projection preserves FDG detail
         'mq_noremesh':   {'remesh': False},  # standard path preserves FDG vertex positions
         'mq_frag200':    {'min_fragment_faces': 200},  # remove more floating debris
@@ -429,6 +429,31 @@ PRESETS = {
         'rcc_g1_l5':      {'rectified_cfgpp': True, 'rcfgpp_lambda_max': 5.0, 'rcfgpp_gamma': 1.0},   # linear ramp
         'rcc_split_l5':   {'rectified_cfgpp': True, 'rcfgpp_lambda_max': 5.0,                          # R-CFG++ + split_sched
                            'ss_schedule': 'quadratic', 'shape_schedule': 'quadratic', 'tex_schedule': 'uniform'},
+    },
+    # Seed variance: measure stochastic noise floor across seeds
+    # Same champion config, only seed differs. Shows cross-seed variance for Best-of-N potential.
+    'seed_variance': {
+        'sv_s42':  {'seed': 42},
+        'sv_s43':  {'seed': 43},
+        'sv_s44':  {'seed': 44},
+        'sv_s45':  {'seed': 45},
+    },
+    # Staged-BoN: generate N shape candidates, pick best by silhouette Dice, texture winner
+    # Bug fixed: enable_single_view_hull pop in _run_staged_bon and sample_sparse_structure
+    'staged_bon_test': {
+        'sbt_baseline':  {},  # N=1 (no selection)
+        'sbt_n2':        {'staged_bon': 2},   # 2 candidates (~1.7x time)
+        'sbt_n4':        {'staged_bon': 4},   # 4 candidates (~2.5x time)
+        'sbt_n8':        {'staged_bon': 8},   # 8 candidates (~4x time)
+    },
+    # Higher sampling steps: more steps = more detail at cost of speed
+    # Champion: ss=12, shape=12, tex=16. Test higher.
+    'higher_steps': {
+        'hs_baseline':   {},  # champion (ss=12, shape=12, tex=16)
+        'hs_tex20':      {'tex_slat_sampling_steps': 20},   # +25% tex steps
+        'hs_tex24':      {'tex_slat_sampling_steps': 24},   # +50% tex steps
+        'hs_all16':      {'ss_sampling_steps': 16, 'shape_slat_sampling_steps': 16,
+                          'tex_slat_sampling_steps': 20},   # all stages higher
     },
     'all': {},  # Combines all presets
 }

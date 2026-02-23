@@ -548,11 +548,13 @@ class QualityEvaluatorV4:
                 continue
 
             # Compute normal map Laplacian (geometry roughness)
-            # Pre-blur with σ=0.8 to remove flat-face-normal triangle edge
-            # artifacts. Reduced from 1.5 (v4) to preserve sensitivity to
-            # genuine surface roughness from voxel grid or mesh simplification.
+            # Pre-blur with σ=1.5 to remove per-triangle normal discontinuities.
+            # At 800K faces, individual triangles are sub-pixel; σ=0.8 was too
+            # small and caused false-positive roughness (B2≈47 instead of 100).
+            # σ=1.5 filters triangle-boundary noise while preserving genuine
+            # surface defects (voxel staircase, mesh corruption).
             normal_float = normal_img.astype(np.float64) / 255.0
-            normal_float = cv2.GaussianBlur(normal_float, (0, 0), 0.8)
+            normal_float = cv2.GaussianBlur(normal_float, (0, 0), 1.5)
 
             lap_energy = 0.0
             for c in range(3):
@@ -1332,7 +1334,8 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
         # Optional params (may not exist in pip-installed version)
         for k, v in [('max_metallic', 0.05), ('min_roughness', 0.4),
                       ('enable_normal_map', False), ('enable_ao', False),
-                      ('enable_grey_recovery', True)]:
+                      ('enable_grey_recovery', True),
+                      ('min_fragment_faces', config.get('min_fragment_faces', 0))]:
             if k in glb_sig.parameters:
                 glb_kwargs[k] = v
         glb = o_voxel.postprocess.to_glb(**glb_kwargs)

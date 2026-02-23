@@ -686,6 +686,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
         # Pop pipeline-level params before passing to sampler
         occupancy_threshold = sampler_params.pop('occupancy_threshold', occupancy_threshold)
+        sampler_params.pop('enable_single_view_hull', None)
+        sampler_params.pop('ss_native_64', None)
         if self.low_vram:
             flow_model.to(self.device)
         z_s = self.sparse_structure_sampler.sample(
@@ -1117,6 +1119,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         cond_512 = self.get_cond([image], 512)
         cond_1024 = self.get_cond([image], 1024) if pipeline_type != '512' else None
         ss_native_64 = sparse_structure_sampler_params.pop('ss_native_64', False)
+        sparse_structure_sampler_params.pop('enable_single_view_hull', None)  # pipeline-level, not sampler
         ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pipeline_type]
         if ss_native_64 and pipeline_type in ('1024_cascade', '1536_cascade'):
             ss_res = 64
