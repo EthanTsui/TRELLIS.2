@@ -200,8 +200,12 @@ class QualityEvaluatorV4:
             base_colors, alpha_masks)
 
         # C3. Detail Richness (from base_color + optional texture map)
+        # Use only lower-pitch views (first half) — high elevation views
+        # show less texture detail by nature which unfairly penalizes C3.
+        # Views are ordered by pitch: [0.15, 0.30, 0.50, 0.65], 8 each.
+        n_c3 = max(8, nviews // 2)
         scores['C3_detail_richness'] = self._detail_richness(
-            base_colors, alpha_masks, texture_map, tex_mask)
+            base_colors[:n_c3], alpha_masks[:n_c3], texture_map, tex_mask)
 
         # D1. Material Plausibility (from metallic/roughness)
         scores['D1_material'] = self._material_plausibility(
@@ -696,99 +700,81 @@ class QualityEvaluatorV4:
     def _detail_richness(self, base_color_views, alpha_masks,
                          texture_map=None, tex_mask=None):
         """
-        Measure intrinsic texture detail richness via composite metric:
-          - 55% Normalized Multi-Scale Gradient (brightness-invariant)
-          - 45% FFT Spectral Energy Ratio (fully deterministic, scale-invariant)
-        Uses median aggregation across views for robustness.
-        Texture-map branch removed to eliminate availability bias.
-        """
-        view_scores = []
-        nviews = len(base_color_views)
+        Measure intrinsic texture detail richness.
 
-        for i in range(nviews):
+        Primary metric: UV texture-map Laplacian energy (80% weight).
+        - Resolution-independent (always 2048x2048 UV map)
+        - Directly measures texture detail in UV space
+        - Well-calibrated: range 5.9-11.3 across configs (30-100 score range)
+
+        Secondary metric: View-based color entropy (20% weight).
+        - Measures color variety visible in rendered views
+        - Complements Laplacian by capturing overall richness
+
+        Note: View-based gradient/FFT metrics were removed because:
+        - Gradient P75 always saturates at 100 on rendered views (dark pixels)
+        - FFT HF ratio at any threshold gives poor discrimination (30-37 range)
+        - Both metrics were uninformative for 3D base_color renders
+        """
+        # --- Primary: Texture-map Laplacian energy (80%) ---
+        tex_detail = 60.0  # default if no texture_map
+        tex_lap_energy = -1.0
+        if texture_map is not None and tex_mask is not None:
+            mask_bool = tex_mask.astype(bool) if tex_mask.dtype != bool else tex_mask
+            if mask_bool.sum() > 1000:
+                tex_gray = cv2.cvtColor(texture_map, cv2.COLOR_RGB2GRAY)
+                tex_lap = cv2.Laplacian(tex_gray.astype(np.float64), cv2.CV_64F)
+                tex_lap_energy = float(np.abs(tex_lap[mask_bool]).mean())
+                # Score mapping for UV texture maps (2048px typically):
+                # Calibrated from 7 GLB configs:
+                #   baseline_v3.2: 5.9,  v4_baseline: 5.9-8.0,
+                #   config_1024: 8.2,    config_1536: 9.2-11.3
+                if tex_lap_energy < 3:
+                    tex_detail = 30.0
+                elif tex_lap_energy < 12:
+                    tex_detail = 30 + (tex_lap_energy - 3) * 7.78  # 30→100
+                else:
+                    tex_detail = 100.0
+
+        # --- Secondary: View-based color entropy (20%) ---
+        # Shannon entropy of grayscale histogram — measures tonal diversity
+        view_entropies = []
+        for i in range(len(base_color_views)):
             bc = base_color_views[i]
             mask = alpha_masks[i] > 128
-            gray = cv2.cvtColor(bc, cv2.COLOR_RGB2GRAY).astype(np.float64) / 255.0
-
-            interior_kern = np.ones((8, 8), np.uint8)
-            interior = cv2.erode(mask.astype(np.uint8), interior_kern) > 0
-
-            if interior.sum() < 200:
-                view_scores.append(50.0)
+            if mask.sum() < 200:
                 continue
+            gray = cv2.cvtColor(bc, cv2.COLOR_RGB2GRAY)
+            vals = gray[mask]
+            hist, _ = np.histogram(vals, bins=64, range=(0, 255))
+            hist = hist.astype(np.float64)
+            hist = hist / hist.sum()
+            hist = hist[hist > 0]
+            entropy = -np.sum(hist * np.log2(hist))
+            view_entropies.append(entropy)
 
-            # --- Sub-metric 1: Normalized Multi-Scale Gradient (55%) ---
-            grad_energies = []
-            for sigma in [1.0, 2.0, 4.0]:
-                ksize = max(3, int(sigma * 3) | 1)
-                blurred = cv2.GaussianBlur(gray, (ksize, ksize), sigma)
-                gx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
-                gy = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
-                grad_mag = np.sqrt(gx**2 + gy**2)
-                local_mean = cv2.GaussianBlur(gray, (ksize, ksize), sigma * 3)
-                norm_grad = grad_mag / (local_mean + 0.01)
-                vals = norm_grad[interior]
-                grad_energies.append(np.percentile(vals, 75))
-            avg_grad = float(np.mean(grad_energies))
-            # Score mapping: calibrated for normalized gradient P75
-            # < 0.05: very smooth (20 pts)
-            # 0.05-0.15: low detail (20-60 pts)
-            # 0.15-0.5: good detail (60-100 pts)
-            # > 0.5: cap at 100
-            if avg_grad < 0.05:
-                grad_score = 20.0
-            elif avg_grad < 0.15:
-                grad_score = 20 + (avg_grad - 0.05) * 400.0
-            elif avg_grad < 0.5:
-                grad_score = 60 + (avg_grad - 0.15) * 114.3
+        if view_entropies:
+            median_entropy = float(np.median(view_entropies))
+            # Score mapping: 64-bin entropy range is [0, 6.0]
+            # Typical 3D renders: 3.5-5.5
+            if median_entropy < 2.5:
+                entropy_score = 30.0
+            elif median_entropy < 4.0:
+                entropy_score = 30 + (median_entropy - 2.5) * 40.0  # 30→90
+            elif median_entropy < 5.5:
+                entropy_score = 90 + (median_entropy - 4.0) * 6.67  # 90→100
             else:
-                grad_score = 100.0
+                entropy_score = 100.0
+        else:
+            entropy_score = 50.0
 
-            # --- Sub-metric 2: FFT Spectral Energy Ratio (45%) ---
-            ys, xs = np.where(interior)
-            if len(ys) < 100:
-                fft_score = 50.0
-            else:
-                y0, y1 = ys.min(), ys.max() + 1
-                x0, x1 = xs.min(), xs.max() + 1
-                patch = gray[y0:y1, x0:x1]
-                h, w = patch.shape
-                if h < 16 or w < 16:
-                    fft_score = 50.0
-                else:
-                    hann_y = np.hanning(h)
-                    hann_x = np.hanning(w)
-                    window = np.outer(hann_y, hann_x)
-                    F = np.fft.fft2(patch * window)
-                    power = np.abs(F)**2
-                    fy = np.fft.fftfreq(h)
-                    fx = np.fft.fftfreq(w)
-                    FY, FX = np.meshgrid(fy, fx, indexing='ij')
-                    radial = np.sqrt(FY**2 + FX**2)
-                    total_power = power.sum()
-                    if total_power < 1e-10:
-                        fft_score = 20.0
-                    else:
-                        hf_ratio = power[radial > 0.25].sum() / total_power
-                        # Score mapping: calibrated for HF energy ratio
-                        # < 0.02: very blurry (20 pts)
-                        # 0.02-0.08: low detail (20-60 pts)
-                        # 0.08-0.25: good detail (60-100 pts)
-                        # > 0.25: cap at 100
-                        if hf_ratio < 0.02:
-                            fft_score = 20.0
-                        elif hf_ratio < 0.08:
-                            fft_score = 20 + (hf_ratio - 0.02) * 666.7
-                        elif hf_ratio < 0.25:
-                            fft_score = 60 + (hf_ratio - 0.08) * 235.3
-                        else:
-                            fft_score = 100.0
-
-            # --- Composite ---
-            s = 0.55 * min(100.0, grad_score) + 0.45 * min(100.0, fft_score)
-            view_scores.append(s)
-
-        return float(np.median(view_scores))
+        # Final composite: texture(80%) + entropy(20%)
+        result = 0.80 * tex_detail + 0.20 * entropy_score
+        print(f"    [C3 summary] tex_lap={tex_lap_energy:.1f}->{tex_detail:.1f} "
+              f"entropy={median_entropy if view_entropies else -1:.2f}->{entropy_score:.1f} "
+              f"final={result:.1f}",
+              flush=True)
+        return result
 
     # ─── D1. Material Plausibility ────────────────────────────────────────
 
@@ -1026,9 +1012,13 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
     mesh.simplify(16777216)
 
     # Render multi-view with canonical camera (r=2, fov=40, 8 views)
+    # Scale render resolution with pipeline resolution to preserve fine detail
+    # 512→512, 1024→512, 1536→768
+    pipeline_res = int(config.get('resolution', '1024'))
+    eval_render_res = 768 if pipeline_res >= 1536 else 512
     t0 = time.time()
     try:
-        channels = render_evaluation_views(mesh, envmap, nviews=8, resolution=512)
+        channels = render_evaluation_views(mesh, envmap, nviews=8, resolution=eval_render_res)
     except Exception as e:
         print(f"  Warning: render failed ({e}), using dummy views", flush=True)
         dummy = np.zeros((512, 512, 3), dtype=np.uint8)

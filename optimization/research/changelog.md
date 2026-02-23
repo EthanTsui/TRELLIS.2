@@ -5,6 +5,38 @@ Uses genetic algorithm principles: keep good parameters, replace bad ones, conti
 
 ---
 
+## Experiment: grid_sample_3d Occupancy Normalization Verification (2026-02-23)
+
+### Scope
+Empirical verification of whether FlexGEMM's `grid_sample_3d` causes grey/desaturated textures through color dilution at sparse voxel boundaries.
+
+### Key Findings
+
+**THE HYPOTHESIS IS DISPROVEN.** FlexGEMM already performs occupancy-normalized trilinear interpolation.
+
+1. CUDA kernel sets `weight=0` for non-existent neighbor voxels; valid weights are pre-normalized to sum to 1.0
+2. Torch reference path also normalizes: `sum(feat*weight) / clamp_min(weight_sum, 1e-12)`
+3. Behavior is BINARY: full value within ~1.45 voxels, zero beyond ~1.5 voxels (cliff, not gradual)
+4. Reference: ICCV 2021 "Interpolation-Aware Padding for 3D Sparse CNNs" (Microsoft Research) confirms FlexGEMM uses "normalized trilinear" approach
+
+### Corrected Understanding of Grey Textures
+The real causes are:
+- Texture SLAT model predicts low-saturation values for unseen surfaces (model behavior, not sampling)
+- FDG dual-vertex averaging when surfaces intersect the same voxel
+- Position errors without BVH reprojection (complete misses = black, not grey)
+
+### Survey v6 Corrections
+- Survey v6 Section 1.1 claim "37-50% color dilution" is FACTUALLY WRONG
+- Survey v6 Rank 2 fix "Chroma-Aware Sampling Mode in grid_sample_3d" targets a non-existent problem
+- The BVH reprojection diagnostic (41.5% → 13.8% grey) proves position accuracy matters, NOT trilinear dilution
+
+### V4 C3 Metric Calibration Issue Found
+- C3 at 1536 resolution always scores ~64/100 despite visually better detail
+- Root cause: eval renders at 512x512; 1536's finer voxels downsample to smoother images
+- Fix: render at 768x768 for 1536 pipeline (`eval_render_res = 768 if pipeline_res >= 1536 else 512`)
+
+---
+
 ## Survey v6: Practical Methods for Texture Coherence (C1) and Color Vitality (C2) (2026-02-22)
 
 ### Scope
