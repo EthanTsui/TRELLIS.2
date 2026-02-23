@@ -18,6 +18,7 @@ from trellis2.renderers import EnvMap
 from trellis2.utils import render_utils
 from trellis2.utils.quality_verifier import QualityVerifier
 from trellis2.postprocessing.texture_refiner import TextureRefiner
+from trellis2.postprocessing.silhouette_corrector import SilhouetteCorrector
 import o_voxel
 
 
@@ -442,6 +443,9 @@ def image_to_3d(
     tex_slat_rescale_t: float,
     tex_slat_cfg_mp_strength: float,
     tex_slat_heun_steps: int,
+    fdg_enabled: bool,
+    fdg_lambda_low: float,
+    fdg_lambda_high: float,
     multistep: bool,
     best_of_n: int,
     back_image: Optional[Image.Image],
@@ -504,6 +508,10 @@ def image_to_3d(
             "cfg_mp_strength": tex_slat_cfg_mp_strength,
             "heun_steps": tex_slat_heun_steps,
             "multistep": multistep,
+            "cfg_mode": "fdg" if fdg_enabled else "standard",
+            "fdg_sigma": 1.0,
+            "fdg_lambda_low": fdg_lambda_low,
+            "fdg_lambda_high": fdg_lambda_high,
         },
         pipeline_type={
             "512": "512",
@@ -612,6 +620,7 @@ def extract_glb(
     state: dict,
     decimation_target: int,
     texture_size: int,
+    enable_silhouette_correction: bool,
     enable_texture_refinement: bool,
     texture_refine_iters: int,
     req: gr.Request,
@@ -624,6 +633,7 @@ def extract_glb(
         state (dict): The state of the generated 3D model.
         decimation_target (int): The target face count for decimation.
         texture_size (int): The texture resolution.
+        enable_silhouette_correction (bool): Whether to correct mesh silhouette.
         enable_texture_refinement (bool): Whether to refine texture via render-and-compare.
         texture_refine_iters (int): Number of refinement iterations.
 
@@ -667,6 +677,18 @@ def extract_glb(
         use_tqdm=True,
         verbose=True,
     )
+
+    # Silhouette correction via differentiable rasterization
+    if enable_silhouette_correction and ref_image is not None:
+        try:
+            glb = silhouette_corrector.correct(
+                glb, ref_image,
+                yaw=0.0, pitch=0.25, r=2.0, fov=40.0,
+                num_steps=80,
+                verbose=True,
+            )
+        except Exception as e:
+            print(f"[SilhouetteCorrector] Warning: correction failed ({e}), using original mesh")
 
     # Texture refinement via render-and-compare
     if enable_texture_refinement and ref_image is not None:
@@ -773,6 +795,11 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                     tex_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=4.0, step=0.1)
                     tex_slat_cfg_mp_strength = gr.Slider(0.0, 0.5, label="CFG-MP Strength", value=0.0, step=0.01)
                     tex_slat_heun_steps = gr.Slider(0, 8, label="Heun Steps (final)", value=4, step=1)
+                gr.Markdown("Frequency-Decoupled Guidance (FDG) — boost high-freq detail, reduce oversaturation")
+                with gr.Row():
+                    fdg_enabled = gr.Checkbox(label="Enable FDG (texture stage)", value=True)
+                    fdg_lambda_low = gr.Slider(0.0, 2.0, label="FDG Low-Freq Weight", value=0.6, step=0.05)
+                    fdg_lambda_high = gr.Slider(0.0, 3.0, label="FDG High-Freq Weight", value=1.3, step=0.05)
                 multistep = gr.Checkbox(label="AB2 Multistep (free 2nd-order accuracy)", value=True)
                 best_of_n = gr.Slider(1, 8, label="Best-of-N (generate N candidates, pick best)", value=1, step=1)
 
@@ -781,6 +808,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 with gr.Step("Preview", id=0):
                     preview_output = gr.HTML(empty_html, label="3D Asset Preview", show_label=True, container=True)
                     with gr.Row():
+                        enable_silhouette_correction = gr.Checkbox(label="Silhouette Correction", value=True)
                         enable_texture_refinement = gr.Checkbox(label="Texture Refinement (render-and-compare)", value=True)
                         texture_refine_iters = gr.Slider(10, 100, label="Refinement Iterations", value=50, step=10)
                     extract_btn = gr.Button("Extract GLB")
@@ -824,6 +852,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t, tex_slat_cfg_mp_strength, tex_slat_heun_steps,
+            fdg_enabled, fdg_lambda_low, fdg_lambda_high,
             multistep, best_of_n,
             back_image, left_image, right_image, top_image, bottom_image,
             multiview_layout, multiview_mode, texture_multiview_mode, custom_angles,
@@ -835,7 +864,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         lambda: gr.Walkthrough(selected=1), outputs=walkthrough
     ).then(
         extract_glb,
-        inputs=[output_buf, decimation_target, texture_size, enable_texture_refinement, texture_refine_iters],
+        inputs=[output_buf, decimation_target, texture_size, enable_silhouette_correction, enable_texture_refinement, texture_refine_iters],
         outputs=[glb_output, download_btn],
     )
         
@@ -855,6 +884,7 @@ if __name__ == "__main__":
 
     quality_verifier = QualityVerifier(device='cuda')
     texture_refiner = TextureRefiner(device='cuda')
+    silhouette_corrector = SilhouetteCorrector(device='cuda')
     
     envmap = {
         'forest': EnvMap(torch.tensor(

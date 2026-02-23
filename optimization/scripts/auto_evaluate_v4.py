@@ -961,7 +961,7 @@ def render_evaluation_views(mesh, envmap, nviews=8, resolution=512):
 
 def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
                           output_prefix="test", best_of_n=1, quality_verifier=None,
-                          texture_refiner=None):
+                          texture_refiner=None, silhouette_corrector=None):
     """Generate a 3D model and evaluate it with V4 scoring."""
     import o_voxel.postprocess
     from trellis2.utils import render_utils
@@ -1073,6 +1073,22 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
     print(f"  GLB extraction: {glb_time:.1f}s", flush=True)
     _log_memory("post-glb")
 
+    # Silhouette correction (differentiable mesh deformation)
+    if glb is not None and silhouette_corrector is not None:
+        t0_sil = time.time()
+        try:
+            glb = silhouette_corrector.correct(
+                glb, processed,
+                yaw=0.0, pitch=0.25, r=2.0, fov=40.0,
+                num_steps=80,
+                verbose=True,
+            )
+            sil_time = time.time() - t0_sil
+            print(f"  Silhouette correction: {sil_time:.1f}s", flush=True)
+        except Exception as e:
+            print(f"  Warning: Silhouette correction failed ({e})", flush=True)
+            traceback.print_exc()
+
     # Texture refinement (render-and-compare optimization)
     if glb is not None and texture_refiner is not None:
         t0_refine = time.time()
@@ -1161,7 +1177,7 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
 
 
 def run_evaluation(config, label="test", test_images=None, best_of_n=1,
-                   texture_refine=False):
+                   texture_refine=False, silhouette_correct=False):
     """Run full V4 evaluation pipeline."""
     if test_images is None:
         test_images = TEST_IMAGES_FULL
@@ -1176,7 +1192,8 @@ def run_evaluation(config, label="test", test_images=None, best_of_n=1,
     print(f"V4 Evaluation: {label}")
     print(f"Config: resolution={config.get('resolution', '1024')}, "
           f"cfg_mp={config.get('cfg_mp_strength', 0.0)}, "
-          f"best_of_n={best_of_n}, texture_refine={texture_refine}")
+          f"best_of_n={best_of_n}, texture_refine={texture_refine}, "
+          f"silhouette_correct={silhouette_correct}")
     print(f"Test images: {len(existing)}")
     print(f"{'='*60}\n")
 
@@ -1198,6 +1215,13 @@ def run_evaluation(config, label="test", test_images=None, best_of_n=1,
         tex_refiner = TextureRefiner(device='cuda')
         print(f"Texture refinement enabled: {config.get('texture_refine_iters', 50)} iters")
 
+    # Initialize silhouette corrector
+    sil_corrector = None
+    if silhouette_correct:
+        from trellis2.postprocessing.silhouette_corrector import SilhouetteCorrector
+        sil_corrector = SilhouetteCorrector(device='cuda')
+        print(f"Silhouette correction enabled: 80 steps")
+
     results = []
     for img_path in existing:
         try:
@@ -1207,6 +1231,7 @@ def run_evaluation(config, label="test", test_images=None, best_of_n=1,
                 best_of_n=best_of_n,
                 quality_verifier=quality_verifier,
                 texture_refiner=tex_refiner,
+                silhouette_corrector=sil_corrector,
             )
             results.append(r)
             # Print per-image scores
@@ -1291,6 +1316,8 @@ def main():
                         help='Best-of-N: generate N candidates, pick best (default: 1)')
     parser.add_argument('--texture-refine', action='store_true',
                         help='Enable render-and-compare texture refinement on GLB')
+    parser.add_argument('--silhouette-correct', action='store_true',
+                        help='Enable post-GLB silhouette correction (deform vertices to match input alpha)')
     args = parser.parse_args()
 
     # Determine test images
@@ -1309,7 +1336,8 @@ def main():
         label = Path(args.config).stem
         run_evaluation(full_config, label=label, test_images=test_images,
                        best_of_n=args.best_of_n,
-                       texture_refine=args.texture_refine)
+                       texture_refine=args.texture_refine,
+                       silhouette_correct=args.silhouette_correct)
 
     elif args.sweep:
         # Sweep mode
@@ -1323,7 +1351,8 @@ def main():
             label = f"v4_sweep_{param}_{val}"
             scores = run_evaluation(config, label=label, test_images=test_images,
                                     best_of_n=args.best_of_n,
-                                    texture_refine=args.texture_refine)
+                                    texture_refine=args.texture_refine,
+                       silhouette_correct=args.silhouette_correct)
             if scores:
                 all_results[val] = scores
                 print(f"\n  {param}={val}: overall={scores['overall']:.1f}")
@@ -1351,19 +1380,24 @@ def main():
         config['cfg_mp_strength'] = args.cfg_mp
         run_evaluation(config, label=f"v4_cfg_mp_{args.cfg_mp}",
                        test_images=test_images, best_of_n=args.best_of_n,
-                       texture_refine=args.texture_refine)
+                       texture_refine=args.texture_refine,
+                       silhouette_correct=args.silhouette_correct)
 
     else:
         # Default: baseline evaluation
         bon_str = f" (Best-of-{args.best_of_n})" if args.best_of_n > 1 else ""
         refine_str = " +TexRefine" if args.texture_refine else ""
-        print(f"=== V4 BASELINE EVALUATION{bon_str}{refine_str} ===\n")
+        silcorr_str = " +SilCorr" if args.silhouette_correct else ""
+        print(f"=== V4 BASELINE EVALUATION{bon_str}{refine_str}{silcorr_str} ===\n")
         label = f"v4_baseline_bon{args.best_of_n}" if args.best_of_n > 1 else "v4_baseline"
         if args.texture_refine:
             label += "_texrefine"
+        if args.silhouette_correct:
+            label += "_silcorr"
         run_evaluation(dict(CHAMPION_CONFIG), label=label,
                        test_images=test_images, best_of_n=args.best_of_n,
-                       texture_refine=args.texture_refine)
+                       texture_refine=args.texture_refine,
+                       silhouette_correct=args.silhouette_correct)
 
 
 if __name__ == '__main__':

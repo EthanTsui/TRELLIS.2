@@ -8,7 +8,9 @@ class ClassifierFreeGuidanceSamplerMixin:
     """
 
     def _inference_model(self, model, x_t, t, cond, neg_cond, guidance_strength,
-                         guidance_rescale=0.0, cfg_mode='standard', apg_alpha=0.3, **kwargs):
+                         guidance_rescale=0.0, cfg_mode='standard', apg_alpha=0.3,
+                         fdg_sigma=1.0, fdg_lambda_low=0.6, fdg_lambda_high=1.3,
+                         **kwargs):
         if guidance_strength == 1:
             pred = super()._inference_model(model, x_t, t, cond, **kwargs)
             self._last_cond_pred_v = pred  # Store for CFG-MP
@@ -20,7 +22,10 @@ class ClassifierFreeGuidanceSamplerMixin:
             pred_neg = super()._inference_model(model, x_t, t, neg_cond, **kwargs)
             self._last_cond_pred_v = pred_pos  # Store conditional pred for CFG-MP
             pred = compute_cfg_prediction(pred_pos, pred_neg, guidance_strength,
-                                          cfg_mode=cfg_mode, apg_alpha=apg_alpha)
+                                          cfg_mode=cfg_mode, apg_alpha=apg_alpha,
+                                          fdg_sigma=fdg_sigma,
+                                          fdg_lambda_low=fdg_lambda_low,
+                                          fdg_lambda_high=fdg_lambda_high)
 
             # CFG rescale
             if guidance_rescale > 0:

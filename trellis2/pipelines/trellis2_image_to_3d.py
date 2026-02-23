@@ -241,6 +241,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 neg_cond=None, guidance_strength=1.0,
                 guidance_interval=(0.0, 1.0), guidance_rescale=0.0,
                 cfg_mode='standard', apg_alpha=0.3,
+                fdg_sigma=1.0, fdg_lambda_low=0.6, fdg_lambda_high=1.3,
                 **kwargs
             ):
                 # cond is (K, N, D) — run raw model once per view, then fuse
@@ -284,7 +285,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                         sampler, model, x_t, t, neg_cond, **kwargs
                     )
                     result = compute_cfg_prediction(pred, neg_pred, guidance_strength,
-                                                    cfg_mode=cfg_mode, apg_alpha=apg_alpha)
+                                                    cfg_mode=cfg_mode, apg_alpha=apg_alpha,
+                                                    fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low,
+                                                    fdg_lambda_high=fdg_lambda_high)
 
                     if guidance_rescale > 0:
                         # Use average of per-view x_0 stds instead of std of averaged
@@ -363,7 +366,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
 
         def _run_with_cfg(model, x_t, t, cond, neg, guidance_strength,
                           guidance_interval, guidance_rescale,
-                          cfg_mode='standard', apg_alpha=0.3, **kwargs):
+                          cfg_mode='standard', apg_alpha=0.3,
+                          fdg_sigma=1.0, fdg_lambda_low=0.6, fdg_lambda_high=1.3,
+                          **kwargs):
             """Run model prediction with CFG and optional rescaling."""
             pred = FlowEulerSampler._inference_model(
                 sampler, model, x_t, t, cond, **kwargs
@@ -377,7 +382,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                     sampler, model, x_t, t, neg, **kwargs
                 )
                 result = compute_cfg_prediction(pred, neg_pred, guidance_strength,
-                                                cfg_mode=cfg_mode, apg_alpha=apg_alpha)
+                                                cfg_mode=cfg_mode, apg_alpha=apg_alpha,
+                                                fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low,
+                                                fdg_lambda_high=fdg_lambda_high)
                 if guidance_rescale > 0:
                     x_0_pos = sampler._pred_to_xstart(x_t, t, pred)
                     x_0_cfg = sampler._pred_to_xstart(x_t, t, result)
@@ -394,6 +401,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             neg_cond=None, guidance_strength=1.0,
             guidance_interval=(0.0, 1.0), guidance_rescale=0.0,
             cfg_mode='standard', apg_alpha=0.3,
+            fdg_sigma=1.0, fdg_lambda_low=0.6, fdg_lambda_high=1.3,
             **kwargs
         ):
             # Compute blend weight: 1.0 = pure concat, 0.0 = pure single
@@ -409,26 +417,34 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 return _run_with_cfg(
                     model, x_t, t, concat_cond_tensor, concat_neg_tensor,
                     guidance_strength, guidance_interval, guidance_rescale,
-                    cfg_mode=cfg_mode, apg_alpha=apg_alpha, **kwargs
+                    cfg_mode=cfg_mode, apg_alpha=apg_alpha,
+                    fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low, fdg_lambda_high=fdg_lambda_high,
+                    **kwargs
                 )
             elif alpha <= 0.0:
                 # Pure single
                 return _run_with_cfg(
                     model, x_t, t, single_cond_tensor, single_neg_tensor,
                     guidance_strength, guidance_interval, guidance_rescale,
-                    cfg_mode=cfg_mode, apg_alpha=apg_alpha, **kwargs
+                    cfg_mode=cfg_mode, apg_alpha=apg_alpha,
+                    fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low, fdg_lambda_high=fdg_lambda_high,
+                    **kwargs
                 )
             else:
                 # Blend zone: run both and lerp predictions
                 pred_concat = _run_with_cfg(
                     model, x_t, t, concat_cond_tensor, concat_neg_tensor,
                     guidance_strength, guidance_interval, guidance_rescale,
-                    cfg_mode=cfg_mode, apg_alpha=apg_alpha, **kwargs
+                    cfg_mode=cfg_mode, apg_alpha=apg_alpha,
+                    fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low, fdg_lambda_high=fdg_lambda_high,
+                    **kwargs
                 )
                 pred_single = _run_with_cfg(
                     model, x_t, t, single_cond_tensor, single_neg_tensor,
                     guidance_strength, guidance_interval, guidance_rescale,
-                    cfg_mode=cfg_mode, apg_alpha=apg_alpha, **kwargs
+                    cfg_mode=cfg_mode, apg_alpha=apg_alpha,
+                    fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low, fdg_lambda_high=fdg_lambda_high,
+                    **kwargs
                 )
                 return alpha * pred_concat + (1 - alpha) * pred_single
 
@@ -575,6 +591,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             neg_cond=None, guidance_strength=1.0,
             guidance_interval=(0.0, 1.0), guidance_rescale=0.0,
             cfg_mode='standard', apg_alpha=0.3,
+            fdg_sigma=1.0, fdg_lambda_low=0.6, fdg_lambda_high=1.3,
             **kwargs
         ):
             # Patch model blocks on first encounter
@@ -609,7 +626,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                     sampler, model, x_t, t, neg, **kwargs
                 )
                 result = compute_cfg_prediction(pred, neg_pred, guidance_strength,
-                                                cfg_mode=cfg_mode, apg_alpha=apg_alpha)
+                                                cfg_mode=cfg_mode, apg_alpha=apg_alpha,
+                                                fdg_sigma=fdg_sigma, fdg_lambda_low=fdg_lambda_low,
+                                                fdg_lambda_high=fdg_lambda_high)
 
                 if guidance_rescale > 0:
                     x_0_pos = sampler._pred_to_xstart(x_t, t, pred)
