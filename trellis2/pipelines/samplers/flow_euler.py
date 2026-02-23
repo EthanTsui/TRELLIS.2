@@ -1,4 +1,5 @@
 from typing import *
+import math
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -184,6 +185,10 @@ class FlowEulerSampler(Sampler):
         # sde_alpha = 0 (off, pure ODE), 0.1-0.5 recommended for diversity/detail
         sde_alpha = kwargs.pop('sde_alpha', 0.0)
         sde_profile = kwargs.pop('sde_profile', 'zero_ends')  # 'zero_ends' or 'sqrt_t'
+        # Guidance rescale anneal: reduce rescale near t=0 to preserve high-frequency CFG detail
+        # rescale_anneal_min = minimum rescale at t=0 (0=off, 0.7=reduce to 70% near t=0)
+        rescale_anneal_min = kwargs.pop('rescale_anneal_min', 0.0)
+        rescale_anneal_start = kwargs.pop('rescale_anneal_start', 0.3)
 
         sample = noise
         t_seq = build_timestep_schedule(
@@ -195,13 +200,24 @@ class FlowEulerSampler(Sampler):
         prev_v = None  # for AB2 multistep
         prev_dt = None
         orig_guidance = kwargs.get('guidance_strength', None)
+        orig_rescale = kwargs.get('guidance_rescale', None)
         for step_idx, (t, t_prev) in enumerate(tqdm(t_pairs, desc=tqdm_desc, disable=not verbose)):
+            # Convert numpy scalars to Python float to avoid numpy*SparseTensor errors
+            # (numpy tries to convert SparseTensor to ndarray, causing ValueError)
+            t, t_prev = float(t), float(t_prev)
             # Apply guidance anneal: linearly reduce guidance from full to min_frac as t → 0
             if guidance_anneal_min > 0 and orig_guidance is not None and t < guidance_anneal_start:
                 frac = t / guidance_anneal_start  # 1.0 at start, 0.0 at t=0
                 kwargs['guidance_strength'] = orig_guidance * (guidance_anneal_min + (1 - guidance_anneal_min) * frac)
             elif orig_guidance is not None and guidance_anneal_min > 0:
                 kwargs['guidance_strength'] = orig_guidance
+            # Apply guidance rescale anneal: reduce rescale near t=0
+            # Lower rescale at tail preserves CFG's high-frequency amplification
+            if rescale_anneal_min > 0 and orig_rescale is not None and t < rescale_anneal_start:
+                frac = t / rescale_anneal_start
+                kwargs['guidance_rescale'] = orig_rescale * (rescale_anneal_min + (1 - rescale_anneal_min) * frac)
+            elif orig_rescale is not None and rescale_anneal_min > 0:
+                kwargs['guidance_rescale'] = orig_rescale
             if step_idx < zero_init_steps:
                 # CFG-Zero*: hold position for early steps
                 ret.pred_x_t.append(sample)
@@ -242,26 +258,37 @@ class FlowEulerSampler(Sampler):
                 out.pred_x_prev = out.pred_x_prev + cfg_mp_strength * (x_manifold - out.pred_x_prev)
             # Stochastic SDE noise injection: adds diversity and can improve detail
             # Only inject noise at intermediate steps (not the final step to t≈0)
-            if sde_alpha > 0 and t_prev > 1e-3:
-                # Compute score function: ∇log p_t(x) ≈ -eps / σ(t)
-                sigma_t = self.sigma_min + (1 - self.sigma_min) * t
-                pred_eps = self._xstart_to_eps(sample, t, out.pred_x_0)
-                score = -pred_eps / sigma_t
-                # Diffusion coefficient g̃(t)
-                if sde_profile == 'zero_ends':
-                    g_tilde = sde_alpha * np.sqrt(max(t * (1 - t), 0))
-                else:  # sqrt_t
-                    g_tilde = sde_alpha * np.sqrt(max(t, 0))
-                abs_dt = abs(dt)
-                # SDE: drift correction + noise injection
-                # Drift: -½g̃²·score·dt (Stochastic Interpolants, Albergo et al.)
-                out.pred_x_prev = out.pred_x_prev - 0.5 * g_tilde**2 * score * dt
-                # Noise: g̃·√dt·z — handle SparseTensor (has .feats/.replace)
-                if hasattr(out.pred_x_prev, 'replace') and hasattr(out.pred_x_prev, 'feats'):
-                    noise = out.pred_x_prev.replace(torch.randn_like(out.pred_x_prev.feats))
-                else:
-                    noise = torch.randn_like(out.pred_x_prev)
-                out.pred_x_prev = out.pred_x_prev + g_tilde * np.sqrt(abs_dt) * noise
+            _sde_alpha = float(sde_alpha) if sde_alpha else 0.0
+            _t_prev_f = float(t_prev)
+            if _sde_alpha > 0 and _t_prev_f > 1e-3:
+                try:
+                    # Compute score function: ∇log p_t(x) ≈ -eps / σ(t)
+                    _t = float(t)
+                    _sigma_t = float(self.sigma_min + (1 - self.sigma_min) * _t)
+                    pred_eps = self._xstart_to_eps(sample, _t, out.pred_x_0)
+                    score = -pred_eps / _sigma_t
+                    # Diffusion coefficient g̃(t)
+                    if sde_profile == 'zero_ends':
+                        g_tilde = float(_sde_alpha * math.sqrt(max(_t * (1 - _t), 0)))
+                    else:  # sqrt_t
+                        g_tilde = float(_sde_alpha * math.sqrt(max(_t, 0)))
+                    _abs_dt = float(abs(dt))
+                    # SDE: drift correction + noise injection
+                    # Drift: -½g̃²·score·dt (Stochastic Interpolants, Albergo et al.)
+                    _dt = float(dt)
+                    out.pred_x_prev = out.pred_x_prev - 0.5 * g_tilde**2 * score * _dt
+                    # Noise: g̃·√dt·z — handle SparseTensor (has .feats/.replace)
+                    if hasattr(out.pred_x_prev, 'replace') and hasattr(out.pred_x_prev, 'feats'):
+                        noise = out.pred_x_prev.replace(torch.randn_like(out.pred_x_prev.feats))
+                    else:
+                        noise = torch.randn_like(out.pred_x_prev)
+                    out.pred_x_prev = out.pred_x_prev + g_tilde * math.sqrt(_abs_dt) * noise
+                except (ValueError, TypeError) as sde_err:
+                    import sys
+                    print(f"[SDE WARNING] step={step_idx} t={t} t_prev={t_prev} "
+                          f"sde_alpha={sde_alpha}({type(sde_alpha).__name__}) "
+                          f"t_prev_type={type(t_prev).__name__}: {sde_err}",
+                          file=sys.stderr, flush=True)
             sample = out.pred_x_prev
             ret.pred_x_t.append(out.pred_x_prev)
             ret.pred_x_0.append(out.pred_x_0)

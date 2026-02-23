@@ -266,8 +266,9 @@ class TextureRefiner:
         tv_weight: float,
         sat_weight: float,
         texture_orig_rgb: torch.Tensor,
+        proximity_weight: float = 0.0,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute combined loss with chrominance L1, LPIPS, TV, and saturation.
+        """Compute combined loss with chrominance L1, LPIPS, TV, proximity, and saturation.
 
         Returns:
             (total_loss, {name: value} dict for logging)
@@ -296,22 +297,32 @@ class TextureRefiner:
         else:
             perceptual_loss = torch.tensor(0.0, device=rendered.device)
 
-        # Total variation
-        tv_loss = total_variation_loss(texture_rgb)
-        losses['tv'] = tv_loss.item()
+        # Total variation (WARNING: smooths texture detail, use sparingly or set to 0)
+        if tv_weight > 0:
+            tv_loss = total_variation_loss(texture_rgb)
+            losses['tv'] = tv_loss.item()
+        else:
+            tv_loss = torch.tensor(0.0, device=rendered.device)
+
+        # Proximity to original: prevent over-modification of texture
+        # This replaces TV as the regularizer — preserves original detail while
+        # allowing color corrections only where the render-and-compare loss demands it.
+        if proximity_weight > 0 and texture_orig_rgb is not None:
+            prox_loss = F.l1_loss(texture_rgb, texture_orig_rgb)
+            losses['prox'] = prox_loss.item()
+        else:
+            prox_loss = torch.tensor(0.0, device=rendered.device)
 
         # Saturation preservation: penalize desaturation relative to original
         if sat_weight > 0 and texture_orig_rgb is not None:
             orig_ycbcr = rgb_to_ycbcr(texture_orig_rgb)
             curr_ycbcr = rgb_to_ycbcr(texture_rgb)
-            # Saturation = sqrt(Cb^2 + Cr^2)
             orig_sat = torch.sqrt(
                 (orig_ycbcr[..., 1] - 0.5)**2 + (orig_ycbcr[..., 2] - 0.5)**2 + 1e-8
             )
             curr_sat = torch.sqrt(
                 (curr_ycbcr[..., 1] - 0.5)**2 + (curr_ycbcr[..., 2] - 0.5)**2 + 1e-8
             )
-            # Penalize reduction in saturation (allow increase)
             sat_deficit = F.relu(orig_sat - curr_sat)
             sat_loss = sat_deficit.mean()
             losses['sat'] = sat_loss.item()
@@ -321,6 +332,7 @@ class TextureRefiner:
         total = (chroma_weight * chroma_loss
                  + lpips_weight * perceptual_loss
                  + tv_weight * tv_loss
+                 + proximity_weight * prox_loss
                  + sat_weight * sat_loss)
         losses['total'] = total.item()
 
@@ -330,11 +342,12 @@ class TextureRefiner:
         self,
         glb_mesh: trimesh.Trimesh,
         reference_image,
-        num_iters: int = 50,
-        lr: float = 0.005,
+        num_iters: int = 20,
+        lr: float = 0.002,
         chroma_weight: float = 1.0,
         lpips_weight: float = 0.3,
-        tv_weight: float = 0.001,
+        tv_weight: float = 0.0,
+        proximity_weight: float = 0.5,
         sat_weight: float = 0.1,
         hf_weight: float = 0.3,
         render_resolution: int = 768,
@@ -349,11 +362,12 @@ class TextureRefiner:
         Args:
             glb_mesh: Input trimesh with UV-mapped PBR texture.
             reference_image: Reference input image (PIL RGBA or numpy).
-            num_iters: Number of optimization iterations.
-            lr: Learning rate for Adam optimizer.
+            num_iters: Optimization iterations (20 recommended; 50 causes over-smoothing).
+            lr: Learning rate for Adam (0.002 recommended; 0.005 over-modifies).
             chroma_weight: Weight for chrominance L1 loss (YCbCr Cb,Cr only).
             lpips_weight: Weight for LPIPS perceptual loss.
-            tv_weight: Weight for total variation regularization (low=0.001 to preserve detail).
+            tv_weight: TV regularization (0.0 recommended — TV smooths detail, kills C3).
+            proximity_weight: Penalize deviation from original texture (preserves detail).
             sat_weight: Weight for saturation preservation.
             hf_weight: Weight for Laplacian high-frequency matching loss (targets C3 metric).
             render_resolution: Resolution for differentiable rendering.
@@ -364,7 +378,8 @@ class TextureRefiner:
             Updated trimesh with refined texture.
         """
         if verbose:
-            print(f"[TextureRefiner] Starting refinement ({num_iters} iters, lr={lr})")
+            print(f"[TextureRefiner] Starting refinement ({num_iters} iters, lr={lr}, "
+                  f"tv={tv_weight}, prox={proximity_weight})")
 
         mesh_data = self._extract_mesh_data(glb_mesh)
         vertices = mesh_data['vertices']
@@ -400,7 +415,7 @@ class TextureRefiner:
             loss, loss_dict = self._compute_losses(
                 rendered, target, mask, texture_rgb,
                 lpips_fn, chroma_weight, lpips_weight, tv_weight, sat_weight,
-                texture_orig_rgb,
+                texture_orig_rgb, proximity_weight=proximity_weight,
             )
 
             # Laplacian high-frequency matching: encourages texture detail

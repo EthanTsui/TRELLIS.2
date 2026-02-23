@@ -225,13 +225,31 @@ class QualityEvaluatorV4:
         scores['E1_multiview'] = self._multiview_consistency(
             base_colors, alpha_masks)
 
+        # Cap all dimension scores at 100 (prevent metric bugs from inflating overall)
+        for d in self.weights:
+            if d in scores:
+                scores[d] = min(scores[d], 100.0)
+
         # Weighted overall
         scores['overall'] = sum(
             scores.get(d, 0) * w / self.total_weight
             for d, w in self.weights.items()
         )
 
-        scores['scoring_version'] = 'v4'
+        # Discriminative score: only metrics that actually differentiate configs
+        disc_weights = {
+            'A1_silhouette': 30,
+            'A2_color_dist': 20,
+            'C1_tex_coherence': 25,
+            'C3_detail_richness': 25,
+        }
+        disc_total = sum(disc_weights.values())
+        scores['disc_score'] = sum(
+            scores.get(d, 0) * w / disc_total
+            for d, w in disc_weights.items()
+        )
+
+        scores['scoring_version'] = 'v4.1'
         return scores
 
     # ─── A1. Silhouette Match ─────────────────────────────────────────────
@@ -315,10 +333,15 @@ class QualityEvaluatorV4:
         if reference_rgba is None:
             return 50.0
 
+        # Always compare at reference resolution to avoid upscaling artifacts.
+        # Downscale rendered views if larger (e.g. 768 render vs 512 reference).
+        ref_h, ref_w = reference_rgba.shape[:2]
         h, w = rendered_rgb.shape[:2]
+        if (h, w) != (ref_h, ref_w):
+            rendered_rgb = cv2.resize(rendered_rgb, (ref_w, ref_h))
+            rendered_alpha = cv2.resize(rendered_alpha, (ref_w, ref_h))
+            h, w = ref_h, ref_w
         ref_resized = reference_rgba
-        if reference_rgba.shape[:2] != (h, w):
-            ref_resized = cv2.resize(reference_rgba, (w, h))
 
         rend_mask = rendered_alpha > 128
         ref_mask = ref_resized[:, :, 3] > 128 if ref_resized.shape[2] == 4 else np.ones((h, w), bool)
@@ -527,10 +550,11 @@ class QualityEvaluatorV4:
                 continue
 
             # Compute normal map Laplacian (geometry roughness)
-            # Pre-blur with σ=1.5 to remove flat-face-normal triangle edge
-            # artifacts that don't reflect actual visual roughness
+            # Pre-blur with σ=0.8 to remove flat-face-normal triangle edge
+            # artifacts. Reduced from 1.5 (v4) to preserve sensitivity to
+            # genuine surface roughness from voxel grid or mesh simplification.
             normal_float = normal_img.astype(np.float64) / 255.0
-            normal_float = cv2.GaussianBlur(normal_float, (0, 0), 1.5)
+            normal_float = cv2.GaussianBlur(normal_float, (0, 0), 0.8)
 
             lap_energy = 0.0
             for c in range(3):
@@ -538,16 +562,16 @@ class QualityEvaluatorV4:
                 lap_energy += np.abs(lap[interior]).mean()
             lap_energy /= 3.0
 
-            # Score mapping:
-            # 0.0-0.02: excellent geometry (100)
-            # 0.02-0.05: good (60-100)
-            # 0.05-0.1: acceptable (30-60)
-            # >0.1: rough/noisy (0-30)
+            # Score mapping (tightened in v4.1 for 1536 pipeline):
+            # 0.0-0.008: excellent geometry (100)
+            # 0.008-0.025: good (60-100)
+            # 0.025-0.06: acceptable (30-60)
+            # >0.06: rough/noisy (0-30)
             s = 100.0
-            if lap_energy > 0.02:
-                s -= min(40, (lap_energy - 0.02) * 1333)
-            if lap_energy > 0.05:
-                s -= min(30, (lap_energy - 0.05) * 600)
+            if lap_energy > 0.008:
+                s -= min(40, (lap_energy - 0.008) * 2353)
+            if lap_energy > 0.025:
+                s -= min(30, (lap_energy - 0.025) * 857)
 
             scores.append(max(0.0, s))
 
@@ -673,20 +697,23 @@ class QualityEvaluatorV4:
             masked_rgb = rgb[mask].astype(np.float32)
 
             # 1. Grey patch detection (-30 max)
+            # Tightened from 15% to 5% (v4.1): grey_recovery reduces to 2-3%
+            # so 15% never triggered. Now detects residual grey texture.
             hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
             sat = hsv[:, :, 1][mask].astype(np.float32)
             val = hsv[:, :, 2][mask].astype(np.float32)
             # Grey = low sat AND mid-luminance (not intentionally dark/bright)
             grey_pixels = (sat < 15) & (val > 40) & (val < 200)
             grey_ratio = grey_pixels.sum() / max(mask.sum(), 1)
-            if grey_ratio > 0.15:
-                s -= min(30, (grey_ratio - 0.15) * 100)
+            if grey_ratio > 0.05:
+                s -= min(30, (grey_ratio - 0.05) * 150)
 
             # 2. Dynamic range (-25 max)
+            # Tightened from 40 to 55 (v4.1): most renders have range >80
             p5, p95 = np.percentile(gray, [5, 95])
             dyn_range = p95 - p5
-            if dyn_range < 40:
-                s -= min(25, (40 - dyn_range) * 0.8)
+            if dyn_range < 55:
+                s -= min(25, (55 - dyn_range) * 0.6)
 
             # 3. Dark patch penalty (-25 max)
             dark_ratio = (gray < 10).sum() / max(gray.size, 1)
@@ -700,6 +727,12 @@ class QualityEvaluatorV4:
             channel_std = np.std([r_mean, g_mean, b_mean])
             if channel_std < 3:
                 s -= min(15, (3 - channel_std) * 5)
+
+            # 5. Mean saturation penalty (-15 max, new in v4.1)
+            # Detects washed-out/desaturated renders
+            mean_sat = sat.mean()
+            if mean_sat < 25:
+                s -= min(15, (25 - mean_sat) * 0.8)
 
             scores.append(max(0.0, s))
 
@@ -724,7 +757,9 @@ class QualityEvaluatorV4:
         Calibrated from 24 saved GLB files (2026-02-23):
           DihedStd range: 9.62 (simple) → 18.41 (complex), threshold 8-16
           TexLap range: 5.9 (v3) → 11.2 (1536 crown)
+        v4.1: log-scale to avoid 1536 ceiling effect
         """
+        import math
         # --- Component 1: Texture-map Laplacian energy (40%) ---
         tex_detail = 60.0  # default if no texture_map
         tex_lap_energy = -1.0
@@ -735,12 +770,17 @@ class QualityEvaluatorV4:
                 tex_lap = cv2.Laplacian(tex_gray.astype(np.float64), cv2.CV_64F)
                 tex_lap_energy = float(np.abs(tex_lap[mask_bool]).mean())
                 # Score mapping for UV texture maps (2048px typically):
-                # Calibrated from 9 GLB configs:
-                #   v3: 5.88, v4_baseline: 5.96-8.00, 1536: 8.85-11.24
+                # v4.1: Use log-scale to avoid 1536 ceiling effect.
+                # Calibrated: v3: 5.88, v4_baseline: 5.96-8.00, 1536: 8.85-11.24
+                # Previous: 3-12 linear → 30-100 (1536 was at ceiling)
+                # New: log-scale with higher ceiling at 15
                 if tex_lap_energy < 3:
                     tex_detail = 30.0
-                elif tex_lap_energy < 12:
-                    tex_detail = 30 + (tex_lap_energy - 3) * 7.78  # 30→100
+                elif tex_lap_energy < 15:
+                    # log-scale: slower growth at higher values
+                    # 3→30, 6→60, 9→78, 12→90, 15→100
+                    log_norm = math.log(tex_lap_energy / 3.0) / math.log(5.0)
+                    tex_detail = 30.0 + 70.0 * min(log_norm, 1.0)
                 else:
                     tex_detail = 100.0
 
@@ -757,11 +797,12 @@ class QualityEvaluatorV4:
                 # Score mapping calibrated from 24 saved GLBs (500K-800K faces):
                 #   cd3c309f: 9.62, T.png: 9.97, bestn_4: 10.7-12.7
                 #   smooth_off: 15.94, quality_upgrade: 18.41
-                #   Range 8-16 → 30-100
+                # v4.1: Raised ceiling from 16→20, log-scale to spread scores
                 if dihed_std < 8:
                     geo_detail = 30.0
-                elif dihed_std < 16:
-                    geo_detail = 30 + (dihed_std - 8) * 8.75  # 30→100
+                elif dihed_std < 20:
+                    log_norm = math.log(dihed_std / 8.0) / math.log(2.5)
+                    geo_detail = 30.0 + 70.0 * min(log_norm, 1.0)
                 else:
                     geo_detail = 100.0
             except Exception:
@@ -838,23 +879,29 @@ class QualityEvaluatorV4:
             s = 100.0
 
             # 1. High metallic penalty (-30 max)
-            high_met_ratio = (met > 0.3).sum() / max(met.size, 1)
-            if high_met_ratio > 0.05:
-                s -= min(30, (high_met_ratio - 0.05) * 200)
+            # Tightened from 0.3 to 0.08 (v4.1): postprocess clamps max=0.05,
+            # so >0.3 never triggered. Now detects residual metallic artifacts.
+            high_met_ratio = (met > 0.08).sum() / max(met.size, 1)
+            if high_met_ratio > 0.02:
+                s -= min(30, (high_met_ratio - 0.02) * 300)
 
             # 2. Extreme roughness penalty (-20 max)
-            mirror_ratio = (rough < 0.1).sum() / max(rough.size, 1)
-            if mirror_ratio > 0.1:
-                s -= min(20, (mirror_ratio - 0.1) * 100)
+            # Tightened from 0.1 to 0.2 (v4.1): postprocess clamps min=0.4,
+            # so <0.1 never triggered.
+            mirror_ratio = (rough < 0.2).sum() / max(rough.size, 1)
+            if mirror_ratio > 0.05:
+                s -= min(20, (mirror_ratio - 0.05) * 150)
 
-            # 3. Roughness uniformity bonus (+5)
+            # 3. Roughness over-uniformity penalty (-15, new in v4.1)
+            # Clamping roughness to min=0.4 creates artificially uniform
+            # roughness maps. Real objects have varied roughness.
             rough_std = rough.std()
-            if rough_std < 0.15:
-                s = min(100, s + 5)
+            if rough_std < 0.03:
+                s -= min(15, (0.03 - rough_std) * 500)
 
             # 4. Metallic-roughness correlation check (-10)
             if high_met_ratio > 0.01:
-                met_areas = met > 0.3
+                met_areas = met > 0.08
                 if met_areas.sum() > 10:
                     met_rough = rough[met_areas].mean()
                     if met_rough > 0.7:
@@ -905,19 +952,22 @@ class QualityEvaluatorV4:
         score = 100.0
 
         # 1. Brightness consistency (-30 max)
+        # Tightened from 0.15 to 0.08 (v4.1): model is very consistent
         bright_cv = np.std(brightness_means) / max(np.mean(brightness_means), 1)
-        if bright_cv > 0.15:
-            score -= min(30, (bright_cv - 0.15) * 150)
+        if bright_cv > 0.08:
+            score -= min(30, (bright_cv - 0.08) * 200)
 
         # 2. Saturation consistency (-25 max)
+        # Tightened from 0.2 to 0.12 (v4.1)
         sat_cv = np.std(saturation_means) / max(np.mean(saturation_means), 1)
-        if sat_cv > 0.2:
-            score -= min(25, (sat_cv - 0.2) * 100)
+        if sat_cv > 0.12:
+            score -= min(25, (sat_cv - 0.12) * 150)
 
         # 3. Detail consistency (-25 max)
+        # Tightened from 0.3 to 0.18 (v4.1)
         detail_cv = np.std(detail_energies) / max(np.mean(detail_energies), 1)
-        if detail_cv > 0.3:
-            score -= min(25, (detail_cv - 0.3) * 80)
+        if detail_cv > 0.18:
+            score -= min(25, (detail_cv - 0.18) * 120)
 
         # 4. Coverage consistency (-20 max)
         if len(coverages) >= 2:
@@ -1094,6 +1144,8 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
                 "guidance_beta_a": config.get('ss_guidance_beta_a', 2.0),
                 "guidance_beta_b": config.get('ss_guidance_beta_b', 5.0),
                 "occupancy_threshold": config.get('ss_occupancy_threshold', 0.0),
+                "enable_single_view_hull": config.get('enable_single_view_hull', False),
+                "ss_native_64": config.get('ss_native_64', False),
             },
             shape_slat_sampler_params={
                 "steps": config['shape_slat_sampling_steps'],
@@ -1122,6 +1174,8 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
                 "guidance_interval": tuple(config.get('tex_guidance_interval', (0.0, 1.0))),
                 "guidance_anneal_min": config.get('tex_guidance_anneal_min', 0.0),
                 "guidance_anneal_start": config.get('tex_guidance_anneal_start', 0.3),
+                "rescale_anneal_min": config.get('tex_rescale_anneal_min', 0.0),
+                "rescale_anneal_start": config.get('tex_rescale_anneal_start', 0.3),
                 "sde_alpha": config.get('tex_sde_alpha', config.get('sde_alpha', 0.0)),
                 "sde_profile": config.get('tex_sde_profile', config.get('sde_profile', 'zero_ends')),
                 # FDG: Frequency-Decoupled Guidance (stage 3 texture only)
@@ -1151,10 +1205,12 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
                 "schedule_power": config.get('ss_schedule_power', config.get('schedule_power', 2.0)),
                 # Occupancy threshold for sparse structure (0.0 default, higher=tighter silhouette)
                 "occupancy_threshold": config.get('ss_occupancy_threshold', 0.0),
+                "enable_single_view_hull": config.get('enable_single_view_hull', False),
                 # Guidance schedule for SS stage
                 "guidance_schedule": config.get('ss_guidance_schedule', 'binary'),
                 "guidance_beta_a": config.get('ss_guidance_beta_a', 2.0),
                 "guidance_beta_b": config.get('ss_guidance_beta_b', 5.0),
+                "ss_native_64": config.get('ss_native_64', False),
                 **({'guidance_interval': tuple(config['ss_guidance_interval'])} if 'ss_guidance_interval' in config else {}),
             },
             shape_slat_sampler_params={
@@ -1191,6 +1247,8 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
                 # Guidance anneal: reduce guidance near t=0 to preserve fine detail
                 "guidance_anneal_min": config.get('tex_guidance_anneal_min', 0.0),
                 "guidance_anneal_start": config.get('tex_guidance_anneal_start', 0.3),
+                "rescale_anneal_min": config.get('tex_rescale_anneal_min', 0.0),
+                "rescale_anneal_start": config.get('tex_rescale_anneal_start', 0.3),
                 # Stochastic SDE sampling
                 "sde_alpha": config.get('tex_sde_alpha', config.get('sde_alpha', 0.0)),
                 "sde_profile": config.get('tex_sde_profile', config.get('sde_profile', 'zero_ends')),
@@ -1215,10 +1273,11 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
     mesh.simplify(16777216)
 
     # Render multi-view with canonical camera (r=2, fov=40, 8 views)
-    # Scale render resolution with pipeline resolution to preserve fine detail
-    # 512→512, 1024→512, 1536→768
-    pipeline_res = int(config.get('resolution', '1024'))
-    eval_render_res = 768 if pipeline_res >= 1536 else 512
+    # Fixed render resolution for consistent evaluation across all pipeline resolutions.
+    # Using different render sizes at different pipeline resolutions creates measurement
+    # confounds: histogram populations, mask boundaries, and reference resampling differ.
+    # See: optimization/research/a2_color_1536_analysis.md
+    eval_render_res = 512
     t0 = time.time()
     try:
         channels = render_evaluation_views(mesh, envmap, nviews=8, resolution=eval_render_res)
@@ -1314,15 +1373,21 @@ def generate_and_evaluate(pipeline, image_path, config, evaluator, envmap,
     if glb is not None and texture_refiner is not None:
         t0_refine = time.time()
         try:
-            refine_iters = config.get('texture_refine_iters', 50)
+            refine_iters = config.get('refine_iters', 20)
+            refine_lr = config.get('refine_lr', 0.002)
+            refine_proximity = config.get('refine_proximity_weight', 0.5)
+            refine_tv = config.get('refine_tv_weight', 0.0)
             glb = texture_refiner.refine(
                 glb, processed,
                 num_iters=refine_iters,
-                lr=0.005,
-                lpips_weight=0.1,
+                lr=refine_lr,
+                lpips_weight=0.3,
+                tv_weight=refine_tv,
+                proximity_weight=refine_proximity,
             )
             refine_time = time.time() - t0_refine
-            print(f"  Texture refinement: {refine_time:.1f}s ({refine_iters} iters)", flush=True)
+            print(f"  Texture refinement: {refine_time:.1f}s ({refine_iters} iters, "
+                  f"prox={refine_proximity}, tv={refine_tv})", flush=True)
         except Exception as e:
             print(f"  Warning: Texture refinement failed ({e})", flush=True)
             traceback.print_exc()

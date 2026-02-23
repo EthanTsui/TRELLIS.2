@@ -307,6 +307,87 @@ PRESETS = {
             'tex_guidance_beta_b': 3.0,
         },
     },
+    # Texture refinement: test fixed refiner (no TV, proximity loss, lower iters/lr)
+    'tex_refine': {
+        'tr_baseline':      {},  # no refinement
+        'tr_fixed':         {'enable_texture_refine': True},  # new defaults (20 iters, prox=0.5, tv=0)
+        'tr_aggressive':    {'enable_texture_refine': True, 'refine_iters': 40, 'refine_proximity_weight': 0.2},
+        'tr_conservative':  {'enable_texture_refine': True, 'refine_iters': 10, 'refine_proximity_weight': 1.0},
+    },
+    # Guidance rescale anneal: reduce rescale near t=0 to preserve CFG detail
+    'rescale_anneal': {
+        'ra_baseline':  {},  # no anneal (rescale=1.0 throughout)
+        'ra_07':        {'tex_rescale_anneal_min': 0.7, 'tex_rescale_anneal_start': 0.3},  # taper to 70%
+        'ra_05':        {'tex_rescale_anneal_min': 0.5, 'tex_rescale_anneal_start': 0.3},  # taper to 50%
+        'ra_07_wide':   {'tex_rescale_anneal_min': 0.7, 'tex_rescale_anneal_start': 0.5},  # wider anneal range
+    },
+    # Single-view visual hull: carve voxels outside silhouette for A1 improvement
+    'sv_hull': {
+        'svh_baseline':  {},  # no hull carving
+        'svh_enabled':   {'enable_single_view_hull': True},  # single-view hull carving
+        'svh_tight':     {'enable_single_view_hull': True, 'ss_occupancy_threshold': 0.5},  # hull + tight threshold
+    },
+    # 64³ native cascade: skip max_pool, preserve decoder boundary detail for A1
+    # WARNING: LR pass uses 1024 model on 64³ coords (~39K tokens) — much slower
+    'cascade_64': {
+        'c64_baseline':  {},  # default 32³ cascade
+        'c64_native':    {'ss_native_64': True},  # 64³ native (no max_pool)
+        'c64_nat_occ05': {'ss_native_64': True, 'ss_occupancy_threshold': 0.5},  # 64³ + tight occ
+    },
+    # 64³ cascade at 1536: the A1 improvement should be most visible at higher res
+    'cascade_64_1536': {
+        'c64h_baseline':   {'resolution': '1536', 'decimation_target': 800000},
+        'c64h_native':     {'resolution': '1536', 'decimation_target': 800000, 'ss_native_64': True},
+        'c64h_nat_occ05':  {'resolution': '1536', 'decimation_target': 800000,
+                            'ss_native_64': True, 'ss_occupancy_threshold': 0.5},
+    },
+    # Round 3: Best combos from all prior tests (1024), updated 2026-02-23
+    # VERIFIED FINDINGS (V4.1):
+    # tri_narrow [0.05,0.9]: A2 +2.1, C1 +2.0, overall +0.6 (BEST for A2/C1)
+    # beta(4,2) guidance: C3 +2.9, overall +0.5 (BEST for C3)
+    # beta(3,3) guidance: A2 +0.6, C1 +1.3, overall +0.7 (BEST overall single change)
+    # split_sched: C3 +0.9, overall +0.2 (quad SS/shape, uniform tex)
+    # SDE: ±0 (confirmed zero effect)
+    'round3_best': {
+        'r3_baseline':     {},  # champion baseline (1024)
+        'r3_b42_narrow':   {    # HYPOTHESIS: C3 + A2/C1 additive
+            'tex_guidance_schedule': 'beta',
+            'tex_guidance_beta_a': 4.0,
+            'tex_guidance_beta_b': 2.0,
+            'tex_guidance_interval': (0.05, 0.9),
+        },
+        'r3_b33_narrow':   {    # best overall schedule + best interval
+            'tex_guidance_schedule': 'beta',
+            'tex_guidance_beta_a': 3.0,
+            'tex_guidance_beta_b': 3.0,
+            'tex_guidance_interval': (0.05, 0.9),
+        },
+        'r3_kitchen_sink': {    # everything combined: schedule + interval + split + BON4
+            'ss_schedule': 'quadratic', 'shape_schedule': 'quadratic',
+            'tex_schedule': 'uniform',
+            'tex_guidance_schedule': 'beta',
+            'tex_guidance_beta_a': 3.0,
+            'tex_guidance_beta_b': 3.0,
+            'tex_guidance_interval': (0.05, 0.9),
+            'staged_bon': 4,
+        },
+    },
+    # Round 4: 1536 resolution combos
+    # config_1536 baseline: overall 93.96, C3=96.9 (+15.9!), A1=83.8 (+2.4), A2=77.7 (-3.2)
+    # Key finding: A2 drop concentrated on crown (-26.3); excl. crown, A2 is HIGHER at 1536
+    # Hypothesis: 1536 needs higher guidance to prevent hallucination on complex objects
+    '1536_combos': {
+        'hd_baseline':     {'resolution': '1536', 'decimation_target': 800000},
+        'hd_triangular':   {'resolution': '1536', 'decimation_target': 800000,
+                            'tex_guidance_schedule': 'triangular'},
+        'hd_hi_guide':     {'resolution': '1536', 'decimation_target': 800000,
+                            'tex_slat_guidance_strength': 15.0,
+                            'shape_slat_guidance_strength': 12.0,
+                            'tex_guidance_schedule': 'triangular'},
+        'hd_bon4_tri':     {'resolution': '1536', 'decimation_target': 800000,
+                            'tex_guidance_schedule': 'triangular',
+                            'staged_bon': 4},
+    },
     'all': {},  # Combines all presets
 }
 
@@ -343,12 +424,23 @@ def run_ab_test(configs: dict, test_images: list, label_prefix: str = 'ab'):
         sil_corrector = SilhouetteCorrector(device='cuda')
         log("SilhouetteCorrector initialized for A/B test")
 
+    # Check if any config needs texture refinement
+    needs_texrefine = any(
+        v.get('enable_texture_refine', False) for v in configs.values()
+    )
+    tex_refiner = None
+    if needs_texrefine:
+        from trellis2.postprocessing.texture_refiner import TextureRefiner
+        tex_refiner = TextureRefiner(device='cuda')
+        log("TextureRefiner initialized for A/B test")
+
     results = {}
 
     for label, overrides in configs.items():
         cfg = dict(CHAMPION_CONFIG)
         cfg.update(overrides)
         use_silcorr = cfg.pop('enable_silcorr', False)
+        use_texrefine = cfg.pop('enable_texture_refine', False)
         desc = " ".join(f"{k}={v}" for k, v in overrides.items()) or "(champion defaults)"
         log(f"\n{'='*50}")
         log(f"=== {label} === {desc}")
@@ -362,13 +454,15 @@ def run_ab_test(configs: dict, test_images: list, label_prefix: str = 'ab'):
                     pipeline, img_path, cfg, evaluator, envmap,
                     output_prefix=f"{label_prefix}_{label}",
                     silhouette_corrector=sil_corrector if use_silcorr else None,
+                    texture_refiner=tex_refiner if use_texrefine else None,
                 )
                 image_results.append(r)
                 s = r['scores']
                 elapsed = time.time() - t0
+                disc = s.get('disc_score', s['overall'])
                 log(f"  {os.path.basename(img_path)}: overall={s['overall']:.1f} "
                     f"A1={s.get('A1_silhouette',0):.1f} A2={s.get('A2_color_dist',0):.1f} "
-                    f"C3={s.get('C3_detail_richness',0):.1f} ({elapsed:.0f}s)")
+                    f"C3={s.get('C3_detail_richness',0):.1f} disc={disc:.1f} ({elapsed:.0f}s)")
             except Exception as e:
                 log(f"  ERROR {os.path.basename(img_path)}: {e}")
                 import traceback
@@ -389,7 +483,8 @@ def run_ab_test(configs: dict, test_images: list, label_prefix: str = 'ab'):
                     if len(vals) > 1:
                         avg[f'{k}_std'] = float(np.std(vals))
             results[label] = avg
-            log(f"  AVG: overall={avg['overall']:.1f}")
+            disc_avg = avg.get('disc_score', avg['overall'])
+            log(f"  AVG: overall={avg['overall']:.1f} disc={disc_avg:.1f}")
 
     return results
 

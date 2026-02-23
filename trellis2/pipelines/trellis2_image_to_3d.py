@@ -1111,7 +1111,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pipeline_type = pipeline_type or self.default_pipeline_type
         cond_512 = self.get_cond([image], 512)
         cond_1024 = self.get_cond([image], 1024) if pipeline_type != '512' else None
+        ss_native_64 = sparse_structure_sampler_params.pop('ss_native_64', False)
         ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pipeline_type]
+        if ss_native_64 and pipeline_type in ('1024_cascade', '1536_cascade'):
+            ss_res = 64
 
         # Extract reference alpha from preprocessed RGBA image
         import numpy as np
@@ -1150,12 +1153,20 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 res = 1024
             elif pipeline_type in ('1024_cascade', '1536_cascade'):
                 target_res = 1024 if pipeline_type == '1024_cascade' else 1536
-                shape_slat, res = self.sample_shape_slat_cascade(
-                    cond_512, cond_1024,
-                    self.models['shape_slat_flow_model_512'],
-                    self.models['shape_slat_flow_model_1024'],
-                    512, target_res, coords, shape_slat_sampler_params,
-                    max_num_tokens)
+                if ss_native_64:
+                    shape_slat, res = self.sample_shape_slat_cascade(
+                        cond_1024, cond_1024,
+                        self.models['shape_slat_flow_model_1024'],
+                        self.models['shape_slat_flow_model_1024'],
+                        1024, target_res, coords, shape_slat_sampler_params,
+                        max_num_tokens)
+                else:
+                    shape_slat, res = self.sample_shape_slat_cascade(
+                        cond_512, cond_1024,
+                        self.models['shape_slat_flow_model_512'],
+                        self.models['shape_slat_flow_model_1024'],
+                        512, target_res, coords, shape_slat_sampler_params,
+                        max_num_tokens)
 
             # Quick decode shape (no texture)
             meshes, _ = self.decode_shape_slat(shape_slat, res)
@@ -1250,10 +1261,36 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         torch.manual_seed(seed)
         cond_512 = self.get_cond([image], 512)
         cond_1024 = self.get_cond([image], 1024) if pipeline_type != '512' else None
+        ss_native_64 = sparse_structure_sampler_params.pop('ss_native_64', False)
         ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pipeline_type]
+        if ss_native_64 and pipeline_type in ('1024_cascade', '1536_cascade'):
+            ss_res = 64
+
+        # Single-view visual hull: carve voxels outside the input silhouette
+        hull_mask = None
+        enable_hull = sparse_structure_sampler_params.pop('enable_single_view_hull', False)
+        if enable_hull:
+            try:
+                from ..utils.visual_hull import compute_visual_hull
+                img_np = np.array(image).astype(np.float32) / 255.0
+                if img_np.ndim == 3 and img_np.shape[2] == 4:
+                    alpha = img_np[:, :, 3]
+                else:
+                    alpha = img_np.max(axis=-1) if img_np.ndim == 3 else img_np
+                silhouette = torch.from_numpy(alpha).float().to(self.device)
+                hull_mask = compute_visual_hull(
+                    silhouettes=[silhouette],
+                    cameras=[{'yaw': 0.0, 'pitch': 0.25}],
+                    grid_resolution=ss_res,
+                    dilation_voxels=2,
+                )
+            except Exception as e:
+                print(f"  Warning: Single-view hull failed ({e})")
+
         coords = self.sample_sparse_structure(
             cond_512, ss_res,
-            num_samples, sparse_structure_sampler_params
+            num_samples, sparse_structure_sampler_params,
+            hull_mask=hull_mask,
         )
         if pipeline_type == '512':
             shape_slat = self.sample_shape_slat(
@@ -1276,25 +1313,45 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             )
             res = 1024
         elif pipeline_type == '1024_cascade':
-            shape_slat, res = self.sample_shape_slat_cascade(
-                cond_512, cond_1024,
-                self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
-                512, 1024,
-                coords, shape_slat_sampler_params,
-                max_num_tokens
-            )
+            if ss_native_64:
+                # 64³ cascade: use 1024 model for LR (handles 64³ natively), lr_res=1024
+                shape_slat, res = self.sample_shape_slat_cascade(
+                    cond_1024, cond_1024,
+                    self.models['shape_slat_flow_model_1024'], self.models['shape_slat_flow_model_1024'],
+                    1024, 1024,
+                    coords, shape_slat_sampler_params,
+                    max_num_tokens
+                )
+            else:
+                shape_slat, res = self.sample_shape_slat_cascade(
+                    cond_512, cond_1024,
+                    self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
+                    512, 1024,
+                    coords, shape_slat_sampler_params,
+                    max_num_tokens
+                )
             tex_slat = self.sample_tex_slat(
                 cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
             )
         elif pipeline_type == '1536_cascade':
-            shape_slat, res = self.sample_shape_slat_cascade(
-                cond_512, cond_1024,
-                self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
-                512, 1536,
-                coords, shape_slat_sampler_params,
-                max_num_tokens
-            )
+            if ss_native_64:
+                # 64³ cascade: use 1024 model for LR (handles 64³ natively), lr_res=1024
+                shape_slat, res = self.sample_shape_slat_cascade(
+                    cond_1024, cond_1024,
+                    self.models['shape_slat_flow_model_1024'], self.models['shape_slat_flow_model_1024'],
+                    1024, 1536,
+                    coords, shape_slat_sampler_params,
+                    max_num_tokens
+                )
+            else:
+                shape_slat, res = self.sample_shape_slat_cascade(
+                    cond_512, cond_1024,
+                    self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
+                    512, 1536,
+                    coords, shape_slat_sampler_params,
+                    max_num_tokens
+                )
             tex_slat = self.sample_tex_slat(
                 cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
@@ -1482,7 +1539,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             cam_params = [{'yaw': y, 'pitch': 0.0} for y in custom_yaw_angles]
         else:
             cam_params = get_camera_params_from_views(list(image.keys()))
+        ss_native_64 = sparse_structure_sampler_params.pop('ss_native_64', False)
         ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pipeline_type]
+        if ss_native_64 and pipeline_type in ('1024_cascade', '1536_cascade'):
+            ss_res = 64
 
         # Skip Visual Hull when all views are horizontal (no vertical constraint)
         all_horizontal = all(abs(cam.get('pitch', 0.0)) < 0.1 for cam in cam_params)
@@ -1634,13 +1694,22 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             res = 1024
         elif pipeline_type == '1024_cascade':
             with shape_ctx:
-                shape_slat, res = self.sample_shape_slat_cascade(
-                    shape_lr_cond, shape_hr_cond,
-                    self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
-                    512, 1024,
-                    coords, shape_slat_sampler_params,
-                    max_num_tokens,
-                )
+                if ss_native_64:
+                    shape_slat, res = self.sample_shape_slat_cascade(
+                        shape_hr_cond, shape_hr_cond,
+                        self.models['shape_slat_flow_model_1024'], self.models['shape_slat_flow_model_1024'],
+                        1024, 1024,
+                        coords, shape_slat_sampler_params,
+                        max_num_tokens,
+                    )
+                else:
+                    shape_slat, res = self.sample_shape_slat_cascade(
+                        shape_lr_cond, shape_hr_cond,
+                        self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
+                        512, 1024,
+                        coords, shape_slat_sampler_params,
+                        max_num_tokens,
+                    )
             with tex_ctx:
                 tex_slat = self.sample_tex_slat(
                     tex_cond_1024, self.models['tex_slat_flow_model_1024'],
@@ -1648,13 +1717,22 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 )
         elif pipeline_type == '1536_cascade':
             with shape_ctx:
-                shape_slat, res = self.sample_shape_slat_cascade(
-                    shape_lr_cond, shape_hr_cond,
-                    self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
-                    512, 1536,
-                    coords, shape_slat_sampler_params,
-                    max_num_tokens,
-                )
+                if ss_native_64:
+                    shape_slat, res = self.sample_shape_slat_cascade(
+                        shape_hr_cond, shape_hr_cond,
+                        self.models['shape_slat_flow_model_1024'], self.models['shape_slat_flow_model_1024'],
+                        1024, 1536,
+                        coords, shape_slat_sampler_params,
+                        max_num_tokens,
+                    )
+                else:
+                    shape_slat, res = self.sample_shape_slat_cascade(
+                        shape_lr_cond, shape_hr_cond,
+                        self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
+                        512, 1536,
+                        coords, shape_slat_sampler_params,
+                        max_num_tokens,
+                    )
             with tex_ctx:
                 tex_slat = self.sample_tex_slat(
                     tex_cond_1024, self.models['tex_slat_flow_model_1024'],
