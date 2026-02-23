@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch Round 4: FDG, texture refinement, shape guidance, BON combos.
+"""Batch Round 4: FDG, texture refinement, shape guidance, BON combos, R-CFG++.
 
 Run AFTER Round 3 completes. Uses V4.1 evaluator (auto-loaded from live mount).
 
@@ -9,6 +9,8 @@ Key untested techniques:
 - tex_refine: Render-and-compare texture optimization via nvdiffrast
 - shape_gs_combined: Bell-curve guidance schedule for shape stage (A1 target)
 - bon_combos: BON4 + best guidance combos
+- rcfgpp: Rectified-CFG++ predictor-corrector (NeurIPS 2025, 3 NFE/step)
+- rcfgpp_combos: R-CFG++ with gamma schedule and split_sched combination
 
 Usage: APP_SCRIPT=optimization/scripts/run_batch_round4.py docker compose up -d
 """
@@ -34,6 +36,13 @@ BATCH = [
 
     # BON + guidance combos: combines Best-of-N with best guidance findings
     ('bon_combos', 1),        # 4 configs × 1 image
+
+    # Rectified-CFG++: manifold-preserving predictor-corrector guidance (NeurIPS 2025)
+    # 3 NFE/step: cond predictor → eval cond+uncond at predicted → interpolative correction
+    ('rcfgpp', 3),            # 4 configs × 3 images (baseline + lambda 3/5/8)
+
+    # R-CFG++ combos: gamma schedule, split_sched combination
+    ('rcfgpp_combos', 1),     # 4 configs × 1 image (quick validation)
 ]
 
 for preset, n_images in BATCH:

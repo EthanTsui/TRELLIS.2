@@ -177,7 +177,9 @@ class FlowEulerSampler(Sampler):
         # 3-NFE predictor-corrector: conditional predictor → evaluate cond+uncond
         # at predicted point → interpolative correction. Keeps trajectories on the
         # data manifold. When active, bypasses CFG mixin (Heun/AB2/CFG-MP disabled).
-        rectified_cfgpp = kwargs.pop('rectified_cfgpp', False)
+        # Backward compat: cfg_pp_steps > 0 also enables R-CFG++
+        cfg_pp_steps = kwargs.pop('cfg_pp_steps', 0)
+        rectified_cfgpp = kwargs.pop('rectified_cfgpp', False) or cfg_pp_steps > 0
         rcfgpp_lambda_max = kwargs.pop('rcfgpp_lambda_max', 4.5)
         rcfgpp_gamma = kwargs.pop('rcfgpp_gamma', 0.0)
         rcfgpp_sigma_noise = kwargs.pop('rcfgpp_sigma_noise', 0.005)
@@ -236,6 +238,9 @@ class FlowEulerSampler(Sampler):
             _cur_guidance = kwargs.get('guidance_strength', 1.0)
             use_rcfgpp = (rectified_cfgpp and _cur_guidance is not None
                           and _cur_guidance > 1.0 and step_idx >= zero_init_steps)
+            if step_idx == 0 and rectified_cfgpp:
+                print(f"  [R-CFG++ debug] rectified_cfgpp={rectified_cfgpp}, guidance={_cur_guidance}, "
+                      f"use_rcfgpp={use_rcfgpp}, neg_cond={'present' if kwargs.get('neg_cond') is not None else 'MISSING'}", flush=True)
 
             if use_rcfgpp:
                 # Rectified-CFG++: 3-NFE predictor-corrector (bypasses CFG mixin)

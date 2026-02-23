@@ -271,6 +271,23 @@ PRESETS = {
         'fdgtv_linear':   {'tex_cfg_mode': 'fdg', 'tex_fdg_lambda_low': 0.5, 'tex_fdg_lambda_high': 1.5, 'tex_fdg_time_schedule': 'linear'},
         'fdgtv_cosine':   {'tex_cfg_mode': 'fdg', 'tex_fdg_lambda_low': 0.5, 'tex_fdg_lambda_high': 1.5, 'tex_fdg_time_schedule': 'cosine'},
     },
+    # Rectified-CFG++ (NeurIPS 2025): 3-NFE predictor-corrector
+    # Evaluates guidance at predicted point (closer to manifold) instead of current point
+    # DEPRECATED: use 'rcfgpp' preset instead (uses correct param names)
+    'rectified_cfgpp': {
+        'rcfg_baseline':  {},  # standard CFG
+        'rcfg_default':   {'rectified_cfgpp': True},  # R-CFG++ with default lambda=4.5
+        'rcfg_lambda3':   {'rectified_cfgpp': True, 'rcfgpp_lambda_max': 3.0},  # lower lambda
+        'rcfg_lambda6':   {'rectified_cfgpp': True, 'rcfgpp_lambda_max': 6.0},  # higher lambda
+    },
+    # Mesh quality: remesh, projection, fragment cleanup
+    # FDG analysis (agent aa8867c) found remesh discards learned sub-voxel offsets
+    'mesh_quality': {
+        'mq_baseline':   {},  # remesh=True, project=0.9, frag=50 (current)
+        'mq_proj098':    {'remesh_project': 0.98},  # closer projection preserves FDG detail
+        'mq_noremesh':   {'remesh': False},  # standard path preserves FDG vertex positions
+        'mq_frag200':    {'min_fragment_faces': 200},  # remove more floating debris
+    },
     # Decimation target: higher → more faces → more geometric detail
     # Champion config uses 800K (matching app.py default)
     'decimation': {
@@ -386,6 +403,24 @@ PRESETS = {
         'hd_bon4_tri':     {'resolution': '1536', 'decimation_target': 800000,
                             'tex_guidance_schedule': 'triangular',
                             'staged_bon': 4},
+    },
+    # Rectified-CFG++ (Saini et al., arXiv 2510.07631, NeurIPS 2025)
+    # 3-NFE predictor-corrector: cond predictor → eval cond+uncond at predicted → interpolative correction
+    # Replaces standard CFG extrapolation (omega>1) with manifold-preserving interpolation
+    # true_cfg (lambda_max) ~4.5 for SD3; needs tuning for TRELLIS.2 (typically guidance/2)
+    'rcfgpp': {
+        'rc_baseline':     {},  # standard CFG (champion defaults)
+        'rc_lam3':         {'rectified_cfgpp': True, 'rcfgpp_lambda_max': 3.0},   # conservative
+        'rc_lam5':         {'rectified_cfgpp': True, 'rcfgpp_lambda_max': 5.0},   # moderate (SD3 default ≈4.5)
+        'rc_lam8':         {'rectified_cfgpp': True, 'rcfgpp_lambda_max': 8.0},   # aggressive
+    },
+    # R-CFG++ with gamma schedule and combinations
+    'rcfgpp_combos': {
+        'rcc_baseline':    {},  # standard CFG
+        'rcc_g0_l5':      {'rectified_cfgpp': True, 'rcfgpp_lambda_max': 5.0, 'rcfgpp_gamma': 0.0},   # constant alpha
+        'rcc_g1_l5':      {'rectified_cfgpp': True, 'rcfgpp_lambda_max': 5.0, 'rcfgpp_gamma': 1.0},   # linear ramp
+        'rcc_split_l5':   {'rectified_cfgpp': True, 'rcfgpp_lambda_max': 5.0,                          # R-CFG++ + split_sched
+                           'ss_schedule': 'quadratic', 'shape_schedule': 'quadratic', 'tex_schedule': 'uniform'},
     },
     'all': {},  # Combines all presets
 }

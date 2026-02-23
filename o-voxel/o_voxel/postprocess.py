@@ -180,6 +180,7 @@ def to_glb(
     enable_mesh_smooth: bool = True,
     mesh_smooth_iterations: int = 3,
     mesh_smooth_lamb: float = 0.5,
+    min_fragment_faces: int = 50,
     verbose: bool = False,
     use_tqdm: bool = False,
 ):
@@ -387,7 +388,7 @@ def to_glb(
     # FDG meshing + simplification can leave thousands of micro-fragments.
     # Remove components with fewer than min_faces to reduce GLB file size
     # and improve commercial mesh quality.
-    min_fragment_faces = 50
+    # min_fragment_faces is now a function parameter (default 50)
     try:
         verts_fc, faces_fc = mesh.read()
         verts_np_fc = verts_fc.cpu().numpy()
