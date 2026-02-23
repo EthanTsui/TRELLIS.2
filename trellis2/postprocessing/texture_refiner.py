@@ -2,15 +2,19 @@
 Render-and-compare texture refinement via differentiable rasterization.
 
 Uses nvdiffrast to render the GLB mesh from the input camera viewpoint,
-then optimizes the UV texture map using L1 + LPIPS + total variation loss.
+then optimizes the UV texture map using chrominance L1 + LPIPS + TV loss.
 Based on GTR paper approach: ~50 iterations, ~10 seconds, +1.12 dB PSNR.
+
+Key design: compares in chrominance (YCbCr Cb,Cr channels) not raw RGB,
+because the reference image has real-world lighting while renders are unlit
+base color. Chrominance is largely lighting-invariant.
 """
 
 import torch
 import torch.nn.functional as F
 import numpy as np
 from PIL import Image
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List
 import trimesh
 
 
@@ -36,11 +40,28 @@ def total_variation_loss(texture: torch.Tensor) -> torch.Tensor:
     return (dx.abs().mean() + dy.abs().mean()) * 0.5
 
 
+def rgb_to_ycbcr(rgb: torch.Tensor) -> torch.Tensor:
+    """Convert RGB [H, W, 3] in [0,1] to YCbCr [H, W, 3].
+
+    Y  = 0.299*R + 0.587*G + 0.114*B  (luminance)
+    Cb = 0.564*(B - Y) + 0.5           (blue chroma, shifted to [0,1])
+    Cr = 0.713*(R - Y) + 0.5           (red chroma, shifted to [0,1])
+    """
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    y = 0.299 * r + 0.587 * g + 0.114 * b
+    cb = 0.564 * (b - y) + 0.5
+    cr = 0.713 * (r - y) + 0.5
+    return torch.stack([y, cb, cr], dim=-1)
+
+
 class TextureRefiner:
     """Post-GLB texture refinement via render-and-compare.
 
     Takes a trimesh GLB, renders it differentiably with nvdiffrast,
     and optimizes the base color texture to match the input reference image.
+
+    Uses chrominance-only L1 (YCbCr Cb,Cr) instead of raw RGB L1 to handle
+    the lighting mismatch between unlit renders and lit reference photos.
 
     Args:
         device: CUDA device string.
@@ -63,13 +84,11 @@ class TextureRefiner:
         vertices = torch.tensor(mesh.vertices, dtype=torch.float32, device=self.device)
         faces = torch.tensor(mesh.faces, dtype=torch.int32, device=self.device)
 
-        # Extract UV coordinates
         if hasattr(mesh.visual, 'uv') and mesh.visual.uv is not None:
             uvs = torch.tensor(mesh.visual.uv, dtype=torch.float32, device=self.device)
         else:
             raise ValueError("Mesh has no UV coordinates — cannot refine texture")
 
-        # Extract base color texture
         material = mesh.visual.material
         if hasattr(material, 'baseColorTexture') and material.baseColorTexture is not None:
             tex_img = material.baseColorTexture
@@ -102,8 +121,11 @@ class TextureRefiner:
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Set up camera extrinsics and projection matrix.
 
+        The GLB mesh has Y-up coordinate system (postprocess applies Y/Z swap:
+        (x,y,z) -> (x,z,-y)). Camera must match this convention.
+
         Returns:
-            (extrinsics, perspective, (near, far))
+            (extrinsics, perspective, intrinsics)
         """
         import utils3d
 
@@ -111,16 +133,22 @@ class TextureRefiner:
         yaw_t = torch.tensor(float(yaw)).to(self.device)
         pitch_t = torch.tensor(float(pitch)).to(self.device)
 
+        # render_utils Z-up convention:
+        #   orig = (sin(yaw)*cos(pitch), cos(yaw)*cos(pitch), sin(pitch)) * r
+        # GLB Y-up convention (postprocess Y/Z swap: x,z,-y):
+        orig_x = torch.sin(yaw_t) * torch.cos(pitch_t)
+        orig_y = torch.cos(yaw_t) * torch.cos(pitch_t)
+        orig_z = torch.sin(pitch_t)
         orig = torch.tensor([
-            torch.sin(yaw_t) * torch.cos(pitch_t),
-            torch.cos(yaw_t) * torch.cos(pitch_t),
-            torch.sin(pitch_t),
+            orig_x,       # X stays
+            orig_z,       # Z -> Y (up)
+            -orig_y,      # -Y -> Z (backward)
         ], device=self.device) * r
 
         extr = utils3d.torch.extrinsics_look_at(
             orig,
             torch.zeros(3, device=self.device),
-            torch.tensor([0, 0, 1], dtype=torch.float32, device=self.device)
+            torch.tensor([0, 1, 0], dtype=torch.float32, device=self.device)
         )
         intr = utils3d.torch.intrinsics_from_fov_xy(fov_rad, fov_rad)
 
@@ -141,38 +169,25 @@ class TextureRefiner:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Differentiable render using nvdiffrast.
 
-        Args:
-            vertices: [V, 3] mesh vertices
-            faces: [F, 3] face indices
-            uvs: [V, 2] UV coordinates
-            texture: [H, W, C] texture map (requires_grad for optimization)
-            extrinsics: [4, 4] camera extrinsics
-            perspective: [4, 4] projection matrix
-            resolution: render resolution
-
         Returns:
             (rendered_image [H, W, 3], mask [H, W, 1])
         """
         import nvdiffrast.torch as dr
 
-        # Project vertices to clip space
         verts_homo = torch.cat([vertices, torch.ones_like(vertices[:, :1])], dim=-1)
         full_proj = perspective @ extrinsics
         verts_clip = (verts_homo @ full_proj.T).unsqueeze(0)  # [1, V, 4]
 
-        # Rasterize
         rast, rast_db = dr.rasterize(
             self.glctx, verts_clip, faces, (resolution, resolution)
         )
 
-        # Interpolate UV coordinates
         texc, texd = dr.interpolate(
             uvs.unsqueeze(0), rast, faces, rast_db=rast_db, diff_attrs='all'
         )
 
-        # Sample texture
         color = dr.texture(
-            texture[:, :, :3].unsqueeze(0).contiguous(),  # [1, H, W, 3]
+            texture[:, :, :3].unsqueeze(0).contiguous(),
             texc,
             texd,
             filter_mode='linear-mipmap-linear',
@@ -210,14 +225,88 @@ class TextureRefiner:
 
         return torch.tensor(arr, dtype=torch.float32, device=self.device)
 
+    def _compute_losses(
+        self,
+        rendered: torch.Tensor,
+        target: torch.Tensor,
+        mask: torch.Tensor,
+        texture_rgb: torch.Tensor,
+        lpips_fn,
+        chroma_weight: float,
+        lpips_weight: float,
+        tv_weight: float,
+        sat_weight: float,
+        texture_orig_rgb: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Compute combined loss with chrominance L1, LPIPS, TV, and saturation.
+
+        Returns:
+            (total_loss, {name: value} dict for logging)
+        """
+        losses = {}
+
+        # Chrominance L1: compare only Cb, Cr (lighting-invariant color)
+        if chroma_weight > 0:
+            rend_ycbcr = rgb_to_ycbcr(rendered)
+            tgt_ycbcr = rgb_to_ycbcr(target)
+            # Compare Cb and Cr channels only (index 1, 2), skip Y (luminance)
+            chroma_loss = F.l1_loss(
+                rend_ycbcr[..., 1:] * mask,
+                tgt_ycbcr[..., 1:] * mask
+            )
+            losses['chroma'] = chroma_loss.item()
+        else:
+            chroma_loss = torch.tensor(0.0, device=rendered.device)
+
+        # LPIPS perceptual loss
+        if lpips_fn is not None and lpips_weight > 0:
+            rendered_lpips = (rendered.permute(2, 0, 1).unsqueeze(0) * 2 - 1).clamp(-1, 1)
+            target_lpips = (target.permute(2, 0, 1).unsqueeze(0) * 2 - 1).clamp(-1, 1)
+            perceptual_loss = lpips_fn(rendered_lpips, target_lpips).mean()
+            losses['lpips'] = perceptual_loss.item()
+        else:
+            perceptual_loss = torch.tensor(0.0, device=rendered.device)
+
+        # Total variation
+        tv_loss = total_variation_loss(texture_rgb)
+        losses['tv'] = tv_loss.item()
+
+        # Saturation preservation: penalize desaturation relative to original
+        if sat_weight > 0 and texture_orig_rgb is not None:
+            orig_ycbcr = rgb_to_ycbcr(texture_orig_rgb)
+            curr_ycbcr = rgb_to_ycbcr(texture_rgb)
+            # Saturation = sqrt(Cb^2 + Cr^2)
+            orig_sat = torch.sqrt(
+                (orig_ycbcr[..., 1] - 0.5)**2 + (orig_ycbcr[..., 2] - 0.5)**2 + 1e-8
+            )
+            curr_sat = torch.sqrt(
+                (curr_ycbcr[..., 1] - 0.5)**2 + (curr_ycbcr[..., 2] - 0.5)**2 + 1e-8
+            )
+            # Penalize reduction in saturation (allow increase)
+            sat_deficit = F.relu(orig_sat - curr_sat)
+            sat_loss = sat_deficit.mean()
+            losses['sat'] = sat_loss.item()
+        else:
+            sat_loss = torch.tensor(0.0, device=rendered.device)
+
+        total = (chroma_weight * chroma_loss
+                 + lpips_weight * perceptual_loss
+                 + tv_weight * tv_loss
+                 + sat_weight * sat_loss)
+        losses['total'] = total.item()
+
+        return total, losses
+
     def refine(
         self,
         glb_mesh: trimesh.Trimesh,
         reference_image,
         num_iters: int = 50,
         lr: float = 0.005,
+        chroma_weight: float = 1.0,
         lpips_weight: float = 0.3,
         tv_weight: float = 0.01,
+        sat_weight: float = 0.1,
         render_resolution: int = 512,
         camera_yaw: float = 0.0,
         camera_pitch: float = 0.25,
@@ -232,8 +321,10 @@ class TextureRefiner:
             reference_image: Reference input image (PIL RGBA or numpy).
             num_iters: Number of optimization iterations.
             lr: Learning rate for Adam optimizer.
+            chroma_weight: Weight for chrominance L1 loss (YCbCr Cb,Cr only).
             lpips_weight: Weight for LPIPS perceptual loss.
             tv_weight: Weight for total variation regularization.
+            sat_weight: Weight for saturation preservation.
             render_resolution: Resolution for differentiable rendering.
             camera_yaw/pitch/r/fov: Camera parameters matching input viewpoint.
             verbose: Print progress.
@@ -244,30 +335,24 @@ class TextureRefiner:
         if verbose:
             print(f"[TextureRefiner] Starting refinement ({num_iters} iters, lr={lr})")
 
-        # Extract mesh data
         mesh_data = self._extract_mesh_data(glb_mesh)
         vertices = mesh_data['vertices']
         faces = mesh_data['faces']
         uvs = mesh_data['uvs']
         texture_orig = mesh_data['texture']  # [H, W, 4] RGBA
 
-        # Make texture parameter (optimize base color only, keep alpha)
         texture_rgb = texture_orig[:, :, :3].clone().detach().requires_grad_(True)
         texture_alpha = texture_orig[:, :, 3:4].clone().detach()
+        texture_orig_rgb = texture_orig[:, :, :3].clone().detach()
 
-        # Setup camera
         extr, perspective, _ = self._setup_camera(
             yaw=camera_yaw, pitch=camera_pitch,
             r=camera_r, fov=camera_fov, resolution=render_resolution
         )
 
-        # Prepare reference
         target = self._prepare_reference(reference_image, render_resolution)
 
-        # Setup optimizer
         optimizer = torch.optim.Adam([texture_rgb], lr=lr)
-
-        # LPIPS for perceptual loss
         lpips_fn = self._get_lpips() if lpips_weight > 0 else None
 
         best_loss = float('inf')
@@ -276,33 +361,20 @@ class TextureRefiner:
         for step in range(num_iters):
             optimizer.zero_grad()
 
-            # Render
             rendered, mask = self._render(
                 vertices, faces, uvs,
                 texture_rgb, extr, perspective, render_resolution
             )
 
-            # L1 loss (only in foreground)
-            l1_loss = F.l1_loss(rendered * mask, target * mask)
+            loss, loss_dict = self._compute_losses(
+                rendered, target, mask, texture_rgb,
+                lpips_fn, chroma_weight, lpips_weight, tv_weight, sat_weight,
+                texture_orig_rgb,
+            )
 
-            # LPIPS loss
-            if lpips_fn is not None and lpips_weight > 0:
-                # Convert to [1, 3, H, W] in [-1, 1]
-                rendered_lpips = (rendered.permute(2, 0, 1).unsqueeze(0) * 2 - 1).clamp(-1, 1)
-                target_lpips = (target.permute(2, 0, 1).unsqueeze(0) * 2 - 1).clamp(-1, 1)
-                perceptual_loss = lpips_fn(rendered_lpips, target_lpips).mean()
-            else:
-                perceptual_loss = torch.tensor(0.0, device=self.device)
-
-            # Total variation
-            tv_loss = total_variation_loss(texture_rgb)
-
-            # Combined loss
-            loss = l1_loss + lpips_weight * perceptual_loss + tv_weight * tv_loss
             loss.backward()
             optimizer.step()
 
-            # Clamp to valid range
             with torch.no_grad():
                 texture_rgb.data.clamp_(0, 1)
 
@@ -311,23 +383,20 @@ class TextureRefiner:
                 best_texture = texture_rgb.data.clone()
 
             if verbose and (step % 10 == 0 or step == num_iters - 1):
-                print(f"  Step {step+1}/{num_iters}: loss={loss.item():.4f} "
-                      f"(L1={l1_loss.item():.4f}, LPIPS={perceptual_loss.item():.4f}, "
-                      f"TV={tv_loss.item():.4f})")
+                parts = ' '.join(f'{k}={v:.4f}' for k, v in loss_dict.items()
+                                 if k != 'total')
+                print(f"  Step {step+1}/{num_iters}: loss={loss.item():.4f} ({parts})")
 
-        # Reconstruct texture with alpha
         refined_texture = torch.cat([best_texture, texture_alpha], dim=-1)
         refined_np = (refined_texture.detach().cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
         refined_pil = Image.fromarray(refined_np, mode='RGBA')
 
-        # Update mesh material
         material = glb_mesh.visual.material
         if hasattr(material, 'baseColorTexture'):
             material.baseColorTexture = refined_pil
         elif hasattr(material, 'image'):
             material.image = refined_pil
 
-        # Reconstruct visual
         glb_mesh.visual = trimesh.visual.TextureVisuals(
             uv=glb_mesh.visual.uv,
             material=material,
@@ -345,26 +414,16 @@ class TextureRefiner:
         camera_params: list,
         num_iters: int = 50,
         lr: float = 0.005,
+        chroma_weight: float = 1.0,
         lpips_weight: float = 0.3,
         tv_weight: float = 0.01,
+        sat_weight: float = 0.1,
         render_resolution: int = 512,
         verbose: bool = True,
     ) -> trimesh.Trimesh:
         """Multi-view texture refinement.
 
         Optimizes texture to match multiple reference views simultaneously.
-
-        Args:
-            glb_mesh: Input trimesh with UV-mapped PBR texture.
-            reference_images: List of reference images (PIL or numpy).
-            camera_params: List of dicts with 'yaw' and 'pitch' (radians).
-            num_iters: Number of optimization iterations.
-            lr/lpips_weight/tv_weight: Loss weights.
-            render_resolution: Resolution for differentiable rendering.
-            verbose: Print progress.
-
-        Returns:
-            Updated trimesh with refined texture.
         """
         if verbose:
             print(f"[TextureRefiner] Multi-view refinement ({len(reference_images)} views, "
@@ -378,8 +437,8 @@ class TextureRefiner:
 
         texture_rgb = texture_orig[:, :, :3].clone().detach().requires_grad_(True)
         texture_alpha = texture_orig[:, :, 3:4].clone().detach()
+        texture_orig_rgb = texture_orig[:, :, :3].clone().detach()
 
-        # Setup cameras for each view
         cameras = []
         targets = []
         for params, ref_img in zip(camera_params, reference_images):
@@ -399,7 +458,7 @@ class TextureRefiner:
 
         for step in range(num_iters):
             optimizer.zero_grad()
-            total_loss = torch.tensor(0.0, device=self.device)
+            total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
 
             for (extr, perspective), target in zip(cameras, targets):
                 rendered, mask = self._render(
@@ -407,21 +466,30 @@ class TextureRefiner:
                     texture_rgb, extr, perspective, render_resolution
                 )
 
-                l1_loss = F.l1_loss(rendered * mask, target * mask)
-                total_loss = total_loss + l1_loss
+                view_loss, _ = self._compute_losses(
+                    rendered, target, mask, texture_rgb,
+                    lpips_fn, chroma_weight, lpips_weight, tv_weight=0,
+                    sat_weight=0, texture_orig_rgb=None,
+                )
+                total_loss = total_loss + view_loss
 
-                if lpips_fn is not None and lpips_weight > 0:
-                    rendered_lpips = (rendered.permute(2, 0, 1).unsqueeze(0) * 2 - 1).clamp(-1, 1)
-                    target_lpips = (target.permute(2, 0, 1).unsqueeze(0) * 2 - 1).clamp(-1, 1)
-                    perceptual_loss = lpips_fn(rendered_lpips, target_lpips).mean()
-                    total_loss = total_loss + lpips_weight * perceptual_loss
-
-            # Average over views
             total_loss = total_loss / len(cameras)
 
-            # TV regularization
+            # Add TV and saturation only once (not per-view)
             tv_loss = total_variation_loss(texture_rgb)
             total_loss = total_loss + tv_weight * tv_loss
+
+            if sat_weight > 0:
+                orig_ycbcr = rgb_to_ycbcr(texture_orig_rgb)
+                curr_ycbcr = rgb_to_ycbcr(texture_rgb)
+                orig_sat = torch.sqrt(
+                    (orig_ycbcr[..., 1] - 0.5)**2 + (orig_ycbcr[..., 2] - 0.5)**2 + 1e-8
+                )
+                curr_sat = torch.sqrt(
+                    (curr_ycbcr[..., 1] - 0.5)**2 + (curr_ycbcr[..., 2] - 0.5)**2 + 1e-8
+                )
+                sat_loss = F.relu(orig_sat - curr_sat).mean()
+                total_loss = total_loss + sat_weight * sat_loss
 
             total_loss.backward()
             optimizer.step()

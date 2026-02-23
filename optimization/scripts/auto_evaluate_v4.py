@@ -325,19 +325,22 @@ class QualityEvaluatorV4:
         for c in [1, 2]:  # a and b channels only
             rend_hist = cv2.calcHist([rend_lab], [c], rend_mask_u8, [24], [0, 256])
             ref_hist = cv2.calcHist([ref_lab], [c], ref_mask_u8, [24], [0, 256])
-            cv2.normalize(rend_hist, rend_hist)
-            cv2.normalize(ref_hist, ref_hist)
-            # Intersection: overlap of two distributions (0-1 range after normalize)
-            intersect = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_INTERSECT)
+            # L1 normalize: sum of bins = 1.0 (required for valid intersection)
+            cv2.normalize(rend_hist, rend_hist, alpha=1.0, beta=0.0,
+                          norm_type=cv2.NORM_L1)
+            cv2.normalize(ref_hist, ref_hist, alpha=1.0, beta=0.0,
+                          norm_type=cv2.NORM_L1)
+            # Intersection: overlap of two distributions (0-1 range with L1 norm)
+            intersect = min(1.0, cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_INTERSECT))
             # Bhattacharyya: 0=identical, higher=different
             bhatt = cv2.compareHist(rend_hist, ref_hist, cv2.HISTCMP_BHATTACHARYYA)
             bhatt_sim = max(0.0, 1.0 - bhatt)
             # Blend intersection + Bhattacharyya
             chroma_scores.append(0.5 * intersect + 0.5 * bhatt_sim)
 
-        # Average a and b channel scores
-        score = sum(chroma_scores) / len(chroma_scores)
-        return float(max(score, 0.0) * 100)
+        # Average a and b channel scores, clamp to [0, 1]
+        score = min(1.0, max(0.0, sum(chroma_scores) / len(chroma_scores)))
+        return float(score * 100)
 
     # ─── B1. Mesh Integrity ───────────────────────────────────────────────
 
